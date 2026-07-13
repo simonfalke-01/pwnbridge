@@ -307,8 +307,40 @@ func TestVersionJSON(t *testing.T) {
 	if err := execute(t, app, "version", "--json"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"protocol": 2`) {
+	if !strings.Contains(output.String(), `"protocol": 3`) || !strings.Contains(output.String(), `"config_schema": 2`) {
 		t.Fatalf("output: %s", output)
+	}
+}
+
+func TestBootstrapRecipeCRUD(t *testing.T) {
+	app, output := testApp(t)
+	file := filepath.Join(t.TempDir(), "recipe.toml")
+	data := "schema = 1\nname = 'lab'\ncomponents = ['core', 'gdb', 'python', 'pwntools', 'tracing']\nsystem_packages = ['ripgrep']\npip_packages = ['ropper==1.13.10']\n"
+	if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "config", "bootstrap", "import", file); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := execute(t, app, "config", "bootstrap", "show", "lab", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"name": "lab"`) || !strings.Contains(output.String(), "ropper==1.13.10") {
+		t.Fatalf("show output: %s", output)
+	}
+	exported := filepath.Join(t.TempDir(), "export.toml")
+	if err := execute(t, app, "config", "bootstrap", "export", "lab", "--output", exported); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(exported); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("export mode: %v %v", info, err)
+	}
+	if err := execute(t, app, "config", "bootstrap", "remove", "lab"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "config", "bootstrap", "show", "lab"); err == nil {
+		t.Fatal("removed recipe was still available")
 	}
 }
 

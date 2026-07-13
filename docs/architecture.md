@@ -4,8 +4,8 @@ Pwnbridge keeps the human-facing workspace on macOS and moves only
 architecture-sensitive execution to native Linux amd64.
 
 ```text
-Mac                                              Ubuntu/Debian amd64
-───                                              ───────────────────
+Mac                                              Linux amd64
+───                                              ───────────
 editor, Git, local tools
         │
 local challenge ─── Mutagen two-way-safe ─────► remote workspace
@@ -47,6 +47,12 @@ The remote static agent owns only per-invocation work:
 There is no persistent Pwnbridge agent daemon. Content-addressed agent binaries
 remain cached for fast future invocations.
 
+Bootstrap is independent of project selection and runtime configuration. A
+read-only SSH inventory feeds its typed recipe planner and host doctor. The
+client-only Huh adapter renders an inline wizard; execution uses one ordinary
+SSH PTY so visible `sudo -v` authentication is shared by fixed-argv steps.
+Complete logs live under XDG state and displayed output is control-sanitized.
+
 ## Workspace identity and state
 
 A workspace ID hashes the installation-specific machine ID, canonical local
@@ -75,7 +81,7 @@ lock serializes barriers and identity initialization.
 Remote paths are similarly scoped below the user's home:
 
 ```text
-~/.local/share/pwnbridge/agents/2/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/3/<sha256>/pwnbridge-agent
 ~/.local/share/pwnbridge/workspaces/<machine-id>/<slug-hash>/
 ~/.cache/pwnbridge/sessions/<session-id>/
 ```
@@ -170,6 +176,11 @@ decodes typed requests and constructs `exec.Cmd` argv arrays. User command
 strings are not reconstructed through a shell. The only deliberate shell
 commands are fixed bootstrap/housekeeping programs whose variable path values
 are single-quoted.
+
+Protocol 3 adds a structured bootstrap request and newline JSON event stream.
+The client sends discrete argv/environment fields through one SSH PTY; the
+agent emits authentication, start, output, completion, and failure events.
+Huh remains confined to the Darwin client dependency graph.
 
 The Linux agent is built with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`. Deployment
 probes the remote platform, uploads to a unique temporary file, verifies SHA-256

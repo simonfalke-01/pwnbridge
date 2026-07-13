@@ -3,7 +3,7 @@
 ## Toolchain
 
 Pwnbridge's module language version is Go 1.25. CI runs the current supported
-Go 1.25 and 1.26 patch lines on macOS and Ubuntu. The client is tested on
+Go 1.25.8 or newer on macOS and Ubuntu. The client is tested on
 Darwin ARM64; the remote agent is a static Linux amd64 cross-build.
 
 ```console
@@ -140,7 +140,9 @@ internal/shell/         marker parser and PTY proxy
 internal/broker/        authenticated debugger lifecycle broker
 internal/terminal/      host provider implementations
 internal/runtime/       host and Docker/Podman adapters
-internal/agent/         Linux execution, wrapper, pane, bootstrap probes
+internal/bootstrap/     typed recipes, inventory, distro adapters, planner/executor
+internal/bootstrap/ui/  client-only inline Huh wizard
+internal/agent/         Linux execution, wrapper, pane, structured protocol
 packaging/              container, Homebrew, and release helpers
 test/e2e/               real amd64 acceptance scenarios
 ```

@@ -77,6 +77,27 @@ func (c Client) Raw(ctx context.Context, command string) ([]byte, error) {
 	return c.run(ctx, "-T", c.Destination, command)
 }
 
+// RunPTY executes one script through one ordinary SSH PTY. Bootstrap uses this
+// to keep sudo authentication visible and to share the sudo timestamp across
+// every privileged step without ever handling credentials itself.
+func (c Client) RunPTY(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, command string) error {
+	args := []string{"-tt"}
+	if c.ControlPath != "" {
+		args = append(args, "-o", "ControlPath="+c.ControlPath)
+	}
+	args = append(args, "--", c.Destination, command)
+	cmd := exec.CommandContext(ctx, c.SSH, args...)
+	cmd.Env = SafeSSHEnvironment()
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+	return nil
+}
+
 func parseBasicProbe(out []byte) (HostProbe, error) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	var probe HostProbe

@@ -34,9 +34,12 @@ fmt-check:
 
 cross-build:
 	mkdir -p bin/cross
-	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -o bin/cross/pwnbridge-darwin-arm64 ./cmd/pwnbridge
-	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath -o bin/cross/pwnbridge-darwin-amd64 ./cmd/pwnbridge
+	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 $(GO) build -trimpath -ldflags='-s -w' -o bin/cross/pwnbridge-darwin-arm64 ./cmd/pwnbridge
+	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 $(GO) build -trimpath -ldflags='-s -w' -o bin/cross/pwnbridge-darwin-amd64 ./cmd/pwnbridge
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -o bin/cross/pwnbridge-agent-linux-amd64 ./cmd/pwnbridge-agent
+	test "$$(wc -c < bin/cross/pwnbridge-darwin-arm64)" -le 16777216
+	test "$$(wc -c < bin/cross/pwnbridge-darwin-amd64)" -le 16777216
+	! $(GO) list -deps ./cmd/pwnbridge-agent | grep -E 'charm.land/(huh|bubbletea|lipgloss)'
 
 verify: fmt-check
 	$(GO) mod verify
@@ -45,6 +48,8 @@ verify: fmt-check
 	$(MAKE) cross-build
 
 fuzz-smoke:
+	$(GO) test ./internal/bootstrap -run '^$$' -fuzz FuzzPortableRequirements -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/bootstrap -run '^$$' -fuzz FuzzBootstrapEventParsing -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/config -run '^$$' -fuzz FuzzStrictProjectTOML -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/protocol -run '^$$' -fuzz FuzzDecode -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/shell -run '^$$' -fuzz FuzzMarker -fuzztime=$(FUZZTIME)

@@ -51,10 +51,159 @@ func Main(args []string) error {
 		return brokerPing(args[1:])
 	case "cleanup":
 		return cleanup(args[1:])
+	case "bootstrap":
+		return bootstrapCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
 }
+
+func bootstrapCommand(args []string) error {
+	var request protocol.BootstrapRequest
+	if err := decodeRequest(args, &request); err != nil {
+		return err
+	}
+	if len(request.Steps) > 512 {
+		return errors.New("bootstrap request has too many steps")
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	emit := func(event protocol.BootstrapEvent) { _ = encoder.Encode(event) }
+	if request.AuthenticateSudo {
+		emit(protocol.BootstrapEvent{Type: "auth", Description: "Authenticate sudo in this terminal"})
+		cmd := exec.Command("sudo", "-v")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("sudo authentication: %w", err)
+		}
+	}
+	home, _ := os.UserHomeDir()
+	user := os.Getenv("USER")
+	for _, step := range request.Steps {
+		if !validBootstrapStep(step) {
+			return fmt.Errorf("invalid bootstrap step %q", step.ID)
+		}
+		emit(protocol.BootstrapEvent{Type: "start", StepID: step.ID, Component: step.Component, Description: step.Description})
+		argv := expandBootstrapArgs(step.Args, home, user)
+		var cmd *exec.Cmd
+		switch step.ID {
+		case "pwntools-venv":
+			cmd = exec.Command("sh", "-c", `envroot="$HOME/.local/share/pwnbridge/envs/pwn-v1"; if test ! -x "$envroot/bin/python" || test ! -x "$envroot/bin/pip"; then rm -rf "$envroot"; python3 -m venv --system-site-packages "$envroot"; fi`)
+		case "pwndbg-install":
+			cmd = exec.Command("sh", "-c", agentPwndbgInstall)
+		default:
+			if len(argv) == 0 {
+				return fmt.Errorf("bootstrap step %q has empty argv", step.ID)
+			}
+			if step.Sudo {
+				argv = append([]string{"sudo", "-n"}, argv...)
+			}
+			cmd = exec.Command(argv[0], argv[1:]...)
+		}
+		cmd.Stdin = os.Stdin
+		cmd.Env = bootstrapEnvironment(home, user, step.Environment)
+		writer := &bootstrapEventWriter{encoder: encoder, step: step}
+		cmd.Stdout, cmd.Stderr = writer, writer
+		if err := cmd.Run(); err != nil {
+			code := 1
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				code = exitErr.ExitCode()
+			}
+			emit(protocol.BootstrapEvent{Type: "failed", StepID: step.ID, Component: step.Component, Description: step.Description, ExitCode: code, Error: err.Error()})
+			return fmt.Errorf("bootstrap step %s: %w", step.ID, err)
+		}
+		emit(protocol.BootstrapEvent{Type: "done", StepID: step.ID, Component: step.Component, Description: step.Description})
+	}
+	return nil
+}
+
+type bootstrapEventWriter struct {
+	encoder *json.Encoder
+	step    protocol.BootstrapStep
+	mu      sync.Mutex
+}
+
+func (w *bootstrapEventWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	err := w.encoder.Encode(protocol.BootstrapEvent{Type: "output", StepID: w.step.ID, Component: w.step.Component, Output: string(data)})
+	return len(data), err
+}
+
+func validBootstrapStep(step protocol.BootstrapStep) bool {
+	if !validID(strings.ReplaceAll(step.ID, "-", "")) || len(step.Args) == 0 || len(step.Args) > 512 {
+		return false
+	}
+	for _, arg := range step.Args {
+		if len(arg) > 4096 || strings.IndexByte(arg, 0) >= 0 {
+			return false
+		}
+	}
+	for key, value := range step.Environment {
+		if !validEnvKey(key) || len(value) > 4096 || strings.IndexByte(value, 0) >= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func validEnvKey(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, r := range value {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+func expandBootstrapArgs(args []string, home, user string) []string {
+	result := make([]string, len(args))
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "$HOME/") {
+			arg = filepath.Join(home, strings.TrimPrefix(arg, "$HOME/"))
+		} else if arg == "$USER" {
+			arg = user
+		}
+		result[i] = arg
+	}
+	return result
+}
+func bootstrapEnvironment(home, user string, extra map[string]string) []string {
+	values := map[string]string{"HOME": home, "USER": user, "LOGNAME": user, "LANG": "C", "LC_ALL": "C", "PATH": filepath.Join(home, ".nix-profile", "bin") + ":/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	if term := os.Getenv("TERM"); term != "" {
+		values["TERM"] = term
+	}
+	for key, value := range extra {
+		values[key] = value
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+values[key])
+	}
+	return result
+}
+
+const agentPwndbgInstall = `set -eu
+root="$HOME/.local/share/pwnbridge/pwndbg"; dest="$root/2026.02.18"
+if test -e "$dest" && test ! -x "$dest/bin/pwndbg"; then rm -rf "$dest"; fi
+if test ! -x "$dest/bin/pwndbg"; then
+  mkdir -p "$root"; tmp=$(mktemp -d "$root/.install-2026.02.18.XXXXXX"); trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+  archive="$tmp/pwndbg.tar.xz"
+  curl --proto '=https' --tlsv1.2 -fL --retry 3 -o "$archive" 'https://github.com/pwndbg/pwndbg/releases/download/2026.02.18/pwndbg_2026.02.18_x86_64-portable.tar.xz'
+  printf '%s  %s\n' 'eeb93972d7910bf8233abf296b00577efb7137d94655502985566a328e5cecce' "$archive" | sha256sum -c -
+  tar -xJf "$archive" -C "$tmp"; test -x "$tmp/pwndbg/bin/pwndbg"; mv "$tmp/pwndbg" "$dest"
+fi
+ln -sfn '2026.02.18' "$root/current"; envbin="$HOME/.local/share/pwnbridge/envs/pwn-v1/bin"; tmp="$envbin/.pwndbg.$$"
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+printf '%s\n' '#!/bin/sh' 'exec "$HOME/.local/share/pwnbridge/pwndbg/current/bin/pwndbg" -nx "$@"' > "$tmp"
+chmod 0755 "$tmp"; mv -f "$tmp" "$envbin/pwndbg"`
 
 func cleanup(args []string) error {
 	var request protocol.CleanupRequest

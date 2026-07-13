@@ -21,6 +21,7 @@ import (
 
 	"github.com/simonfalke-01/pwnbridge/internal/agent"
 	"github.com/simonfalke-01/pwnbridge/internal/bootstrap"
+	bootstrapui "github.com/simonfalke-01/pwnbridge/internal/bootstrap/ui"
 	"github.com/simonfalke-01/pwnbridge/internal/broker"
 	"github.com/simonfalke-01/pwnbridge/internal/config"
 	"github.com/simonfalke-01/pwnbridge/internal/diagnostics"
@@ -1076,25 +1077,36 @@ func (a *App) hostRemove() *cobra.Command {
 func (a *App) hostDoctor() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{Use: "doctor NAME", Short: "Check a remote host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := a.loadProject(cmd.Context(), false)
+		effective, err := config.LoadGlobal(a.Paths)
 		if err != nil {
 			return err
 		}
-		host, ok := p.Config.Global.Hosts[args[0]]
+		host, ok := effective.Global.Hosts[args[0]]
 		if !ok {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
 		client := transport.New(host.Destination, "")
-		asset, assetErr := transport.FindAgentAsset(p.Config.AgentPath)
-		if assetErr != nil {
-			return assetErr
+		inventory, err := bootstrap.Inspect(cmd.Context(), client)
+		if err != nil {
+			return err
 		}
-		remoteAgent, deployErr := client.DeployAgent(cmd.Context(), asset)
-		if deployErr != nil {
-			return fmt.Errorf("deploy diagnostic agent: %w", deployErr)
+		profile := host.BootstrapProfile
+		if profile == "" {
+			profile = "pwn"
 		}
-		client.AgentPath = remoteAgent
-		checks := diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote", host.ShellTransport)
+		value, err := resolveBootstrapRecipe(profile, effective.Global.BootstrapProfiles)
+		if err != nil {
+			return err
+		}
+		value, explanations, err := bootstrap.ResolveRecipe(value, nil, nil, nil, nil)
+		if err != nil {
+			return err
+		}
+		plan, err := bootstrap.BuildPlan(inventory, value, explanations, bootstrap.PlanOptions{AcceptDockerRootRisk: true})
+		if err != nil {
+			return err
+		}
+		checks := diagnostics.Bootstrap(inventory, plan)
 		if asJSON {
 			if err := writeJSON(a.Out, map[string]any{"ok": diagnostics.Healthy(checks), "checks": checks}); err != nil {
 				return err
@@ -1121,58 +1133,211 @@ func (a *App) hostDoctor() *cobra.Command {
 
 func (a *App) hostBootstrap() *cobra.Command {
 	var options bootstrap.Options
-	var profile string
+	var profile, recipeFile, saveProfile, interactive string
+	var with, without, systemPackages, pipPackages []string
 	cmd := &cobra.Command{Use: "bootstrap NAME", Short: "Prepare a remote host for pwn work", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if profile != "pwn" {
-			return errors.New("only the pwn bootstrap profile is supported")
+		if options.JSON {
+			interactive = "never"
 		}
-		p, err := a.loadProject(cmd.Context(), false)
+		if interactive != "auto" && interactive != "always" && interactive != "never" {
+			return errors.New("--interactive must be auto, always, or never")
+		}
+		if profile != "" && recipeFile != "" {
+			return errors.New("--profile and --recipe-file are mutually exclusive")
+		}
+		effective, err := config.LoadGlobal(a.Paths)
 		if err != nil {
 			return err
 		}
-		host, ok := p.Config.Global.Hosts[args[0]]
+		host, ok := effective.Global.Hosts[args[0]]
 		if !ok {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
 		client := transport.New(host.Destination, "")
-		if !options.DryRun {
-			asset, assetErr := transport.FindAgentAsset(p.Config.AgentPath)
-			if assetErr != nil {
-				return assetErr
-			}
-			remoteAgent, deployErr := client.DeployAgent(cmd.Context(), asset)
-			if deployErr != nil {
-				return deployErr
-			}
-			client.AgentPath = remoteAgent
-		}
-		if err := bootstrap.Run(cmd.Context(), client, options); err != nil {
-			return err
-		}
-		if options.DryRun {
-			return nil
-		}
-		probe, err := client.ProbeAgent(cmd.Context())
+		inventory, err := bootstrap.Inspect(cmd.Context(), client)
 		if err != nil {
 			return err
 		}
-		if engine := configuredContainerEngine(p.Config); engine != "" {
-			available := probe.Tools[engine]
-			if engine == "auto" {
-				available = probe.Tools["podman"] || probe.Tools["docker"]
+		baseName := profile
+		if baseName == "" {
+			baseName = host.BootstrapProfile
+		}
+		if baseName == "" {
+			baseName = "pwn"
+		}
+		var value bootstrap.Recipe
+		if recipeFile != "" {
+			value, err = bootstrap.LoadRecipe(recipeFile)
+		} else {
+			value, err = resolveBootstrapRecipe(baseName, effective.Global.BootstrapProfiles)
+		}
+		if err != nil {
+			return err
+		}
+		withIDs, err := bootstrap.ParseComponentList(with)
+		if err != nil {
+			return err
+		}
+		withoutIDs, err := bootstrap.ParseComponentList(without)
+		if err != nil {
+			return err
+		}
+		if options.WithPwndbg {
+			withIDs = append(withIDs, bootstrap.ComponentPwndbg)
+		}
+		value, explanations, err := bootstrap.ResolveRecipe(value, withIDs, withoutIDs, systemPackages, pipPackages)
+		if err != nil {
+			return err
+		}
+		useWizard := interactive == "always" || interactive == "auto" && usableWizardTTY(a)
+		if interactive == "always" && !usableWizardTTY(a) {
+			return errors.New("--interactive=always requires usable input and output TTYs and non-dumb TERM")
+		}
+		if useWizard {
+			wizard, wizardErr := bootstrapui.Run(cmd.Context(), bootstrapui.Options{Input: a.In, Output: a.Out, Inventory: inventory, Profiles: effective.Global.BootstrapProfiles, InitialProfile: baseName, With: withIDs, Without: withoutIDs, SystemPackages: systemPackages, PipPackages: pipPackages, NoSudo: options.NoSudo, AcceptDockerRisk: options.AcceptDockerRootRisk, Accessible: options.Accessible})
+			if wizardErr != nil {
+				return wizardErr
 			}
-			if !available {
-				return fmt.Errorf("configured container engine %q is unavailable after bootstrap", engine)
+			value, explanations, options.Yes = wizard.Recipe, wizard.Plan.Explanations, true
+			options.AcceptDockerRootRisk = wizard.AcceptDockerRisk
+			if wizard.SaveName != "" && saveProfile == "" {
+				saveProfile = wizard.SaveName
+			}
+			if wizard.BindHost {
+				host.BootstrapProfile = wizard.SaveName
+				effective.Global.Hosts[args[0]] = host
+			}
+		} else if !options.Yes && !options.DryRun {
+			preview, planErr := bootstrap.BuildPlan(inventory, value, explanations, bootstrap.PlanOptions{NoSudo: options.NoSudo, AcceptDockerRootRisk: options.AcceptDockerRootRisk})
+			if planErr != nil {
+				return planErr
+			}
+			confirmationErr := errors.New("non-interactive bootstrap requires --yes after reviewing the resolved plan")
+			if options.JSON {
+				if err := writeJSON(a.Out, bootstrap.Result{OK: false, Plan: preview, Error: confirmationErr.Error()}); err != nil {
+					return err
+				}
+			} else {
+				bootstrap.PrintPlan(a.Out, preview)
+			}
+			return confirmationErr
+		}
+		if saveProfile != "" {
+			if options.DryRun {
+				return errors.New("--dry-run cannot save bootstrap recipes")
+			}
+			if saveProfile == "pwn" || saveProfile == "minimal" {
+				return errors.New("cannot replace a built-in bootstrap recipe")
+			}
+			value.Name = saveProfile
+			if err := bootstrap.ValidateRecipe(value); err != nil {
+				return err
+			}
+			if effective.Global.BootstrapProfiles == nil {
+				effective.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
+			}
+			effective.Global.BootstrapProfiles[saveProfile] = value
+			if err := effective.Validate(); err != nil {
+				return err
+			}
+			if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
+				return err
 			}
 		}
-		fmt.Fprintf(a.Out, "bootstrapped %s (%s/%s)\n", args[0], probe.OS, probe.Architecture)
+		if !options.DryRun {
+			deployPlan, planErr := bootstrap.BuildPlan(inventory, value, explanations, bootstrap.PlanOptions{NoSudo: options.NoSudo, AcceptDockerRootRisk: options.AcceptDockerRootRisk})
+			if planErr != nil {
+				return planErr
+			}
+			if deployPlan.ValidateExecutable() == nil && len(deployPlan.Steps) > 0 {
+				asset, assetErr := transport.FindAgentAsset(effective.AgentPath)
+				if assetErr != nil {
+					return assetErr
+				}
+				remoteAgent, deployErr := client.DeployAgent(cmd.Context(), asset)
+				if deployErr != nil {
+					return fmt.Errorf("deploy bootstrap agent: %w", deployErr)
+				}
+				client.AgentPath = remoteAgent
+			}
+		}
+		options.Recipe, options.Explanations, options.Inventory = value, explanations, &inventory
+		options.Input, options.Output, options.ErrorOutput = a.In, a.Out, a.Err
+		options.LogPath = filepath.Join(a.Paths.State, "bootstrap", args[0]+"-"+time.Now().UTC().Format("20060102T150405Z")+".log")
+		if options.JSON {
+			options.Output = io.Discard
+		}
+		result, runErr := bootstrap.RunResult(cmd.Context(), client, options)
+		for runErr != nil && useWizard {
+			choice, choiceErr := bootstrapui.FailureChoice(cmd.Context(), a.In, a.Out, options.Accessible, result.LogPath)
+			if choiceErr != nil {
+				return errors.Join(runErr, choiceErr)
+			}
+			switch choice {
+			case "log":
+				if err := bootstrap.PrintSanitizedLog(a.Out, result.LogPath); err != nil {
+					fmt.Fprintln(a.Err, "show bootstrap log:", err)
+				}
+				continue
+			case "retry":
+				options.Inventory = nil
+				result, runErr = bootstrap.RunResult(cmd.Context(), client, options)
+				continue
+			default:
+				return runErr
+			}
+		}
+		if options.JSON {
+			if jsonErr := writeJSON(a.Out, result); jsonErr != nil {
+				return jsonErr
+			}
+		}
+		if runErr != nil {
+			return runErr
+		}
+		if !options.JSON && !options.DryRun {
+			fmt.Fprintf(a.Out, "bootstrapped %s in %s; log: %s\n", args[0], result.Elapsed.Round(time.Second), result.LogPath)
+		}
 		return nil
 	}}
-	cmd.Flags().StringVar(&profile, "profile", "pwn", "bootstrap profile")
+	cmd.Flags().StringVar(&interactive, "interactive", "auto", "wizard mode: auto, always, or never")
+	cmd.Flags().StringVar(&profile, "profile", "", "built-in or saved bootstrap profile")
+	cmd.Flags().StringVar(&recipeFile, "recipe-file", "", "portable bootstrap recipe TOML")
+	cmd.Flags().StringArrayVar(&with, "with", nil, "enable a component (repeatable)")
+	cmd.Flags().StringArrayVar(&without, "without", nil, "disable an optional component (repeatable)")
+	cmd.Flags().StringArrayVar(&systemPackages, "apt-package", nil, "extra validated system package (repeatable)")
+	cmd.Flags().StringArrayVar(&pipPackages, "pip-package", nil, "extra validated pip requirement (repeatable)")
+	cmd.Flags().StringVar(&saveProfile, "save-profile", "", "save the resolved portable recipe")
 	cmd.Flags().BoolVar(&options.WithPwndbg, "with-pwndbg", false, "install pwndbg")
 	cmd.Flags().BoolVar(&options.DryRun, "dry-run", false, "print commands without running them")
 	cmd.Flags().BoolVar(&options.NoSudo, "no-sudo", false, "skip system packages")
+	cmd.Flags().BoolVar(&options.Yes, "yes", false, "apply the resolved non-interactive plan")
+	cmd.Flags().BoolVar(&options.AcceptDockerRootRisk, "accept-docker-root-risk", false, "accept that Docker group membership is root-equivalent")
+	cmd.Flags().BoolVar(&options.Accessible, "accessible", false, "use accessible line-oriented form mode")
+	cmd.Flags().BoolVar(&options.Verbose, "verbose", false, "stream sanitized command output")
+	cmd.Flags().BoolVar(&options.JSON, "json", false, "emit one final JSON result")
 	return cmd
+}
+
+func resolveBootstrapRecipe(name string, profiles map[string]bootstrap.Recipe) (bootstrap.Recipe, error) {
+	if value, ok := bootstrap.BuiltinRecipe(name); ok {
+		return value, nil
+	}
+	if value, ok := profiles[name]; ok {
+		return value, nil
+	}
+	return bootstrap.Recipe{}, fmt.Errorf("unknown bootstrap profile %q", name)
+}
+
+func usableWizardTTY(a *App) bool {
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") || os.Getenv("TERM") == "" {
+		return false
+	}
+	if a.In == nil || !term.IsTerminal(int(a.In.Fd())) {
+		return false
+	}
+	out, ok := a.Out.(*os.File)
+	return ok && term.IsTerminal(int(out.Fd()))
 }
 
 func configuredContainerEngine(e config.Effective) string {
@@ -1444,6 +1609,7 @@ func (a *App) runtimeCommand() *cobra.Command {
 
 func (a *App) configCommand() *cobra.Command {
 	configCmd := &cobra.Command{Use: "config", Short: "Inspect configuration"}
+	configCmd.AddCommand(a.bootstrapConfigCommand())
 	configCmd.AddCommand(&cobra.Command{Use: "path", Short: "Show configuration paths", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
@@ -1485,6 +1651,142 @@ func (a *App) configCommand() *cobra.Command {
 	show.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	configCmd.AddCommand(show)
 	return configCmd
+}
+
+func (a *App) bootstrapConfigCommand() *cobra.Command {
+	root := &cobra.Command{Use: "bootstrap", Short: "Manage portable bootstrap recipes"}
+	root.AddCommand(&cobra.Command{Use: "list", Short: "List bootstrap recipes", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+		effective, err := config.LoadGlobal(a.Paths)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Out, "minimal\tbuilt-in")
+		fmt.Fprintln(a.Out, "pwn\tbuilt-in")
+		names := make([]string, 0, len(effective.Global.BootstrapProfiles))
+		for name := range effective.Global.BootstrapProfiles {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Fprintln(a.Out, name+"\tsaved")
+		}
+		return nil
+	}})
+	var showJSON bool
+	show := &cobra.Command{Use: "show NAME", Short: "Show a bootstrap recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		effective, err := config.LoadGlobal(a.Paths)
+		if err != nil {
+			return err
+		}
+		value, err := resolveBootstrapRecipe(args[0], effective.Global.BootstrapProfiles)
+		if err != nil {
+			return err
+		}
+		if showJSON {
+			return writeJSON(a.Out, value)
+		}
+		data, err := bootstrap.MarshalRecipe(value)
+		if err != nil {
+			return err
+		}
+		_, err = a.Out.Write(data)
+		return err
+	}}
+	show.Flags().BoolVar(&showJSON, "json", false, "emit JSON")
+	root.AddCommand(show)
+	var importName string
+	var replace bool
+	importCmd := &cobra.Command{Use: "import FILE", Short: "Import a portable recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		value, err := bootstrap.LoadRecipe(args[0])
+		if err != nil {
+			return err
+		}
+		if importName != "" {
+			value.Name = importName
+		}
+		if value.Name == "pwn" || value.Name == "minimal" {
+			return errors.New("cannot replace a built-in bootstrap recipe")
+		}
+		if err := bootstrap.ValidateRecipe(value); err != nil {
+			return err
+		}
+		effective, err := config.LoadGlobal(a.Paths)
+		if err != nil {
+			return err
+		}
+		if _, exists := effective.Global.BootstrapProfiles[value.Name]; exists && !replace {
+			return fmt.Errorf("bootstrap recipe %q already exists; pass --replace", value.Name)
+		}
+		if effective.Global.BootstrapProfiles == nil {
+			effective.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
+		}
+		effective.Global.BootstrapProfiles[value.Name] = value
+		if err := effective.Validate(); err != nil {
+			return err
+		}
+		if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Out, "imported bootstrap recipe "+value.Name)
+		return nil
+	}}
+	importCmd.Flags().StringVar(&importName, "name", "", "override the imported recipe name")
+	importCmd.Flags().BoolVar(&replace, "replace", false, "replace an existing saved recipe")
+	root.AddCommand(importCmd)
+	var exportOutput string
+	exportCmd := &cobra.Command{Use: "export NAME", Short: "Export a portable recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		effective, err := config.LoadGlobal(a.Paths)
+		if err != nil {
+			return err
+		}
+		value, err := resolveBootstrapRecipe(args[0], effective.Global.BootstrapProfiles)
+		if err != nil {
+			return err
+		}
+		data, err := bootstrap.MarshalRecipe(value)
+		if err != nil {
+			return err
+		}
+		if exportOutput == "" || exportOutput == "-" {
+			_, err = a.Out.Write(data)
+			return err
+		}
+		return fsutil.AtomicWrite(exportOutput, data, 0o600)
+	}}
+	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "-", "output file or - for stdout")
+	root.AddCommand(exportCmd)
+	root.AddCommand(&cobra.Command{Use: "remove NAME", Short: "Remove a saved bootstrap recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+		if args[0] == "pwn" || args[0] == "minimal" {
+			return errors.New("cannot remove a built-in bootstrap recipe")
+		}
+		effective, err := config.LoadGlobal(a.Paths)
+		if err != nil {
+			return err
+		}
+		if _, exists := effective.Global.BootstrapProfiles[args[0]]; !exists {
+			return fmt.Errorf("unknown saved bootstrap recipe %q", args[0])
+		}
+		var bound []string
+		for name, host := range effective.Global.Hosts {
+			if host.BootstrapProfile == args[0] {
+				bound = append(bound, name)
+			}
+		}
+		sort.Strings(bound)
+		if len(bound) > 0 {
+			return fmt.Errorf("bootstrap recipe %q is bound to hosts %s; rebind them before removal", args[0], strings.Join(bound, ", "))
+		}
+		delete(effective.Global.BootstrapProfiles, args[0])
+		if err := effective.Validate(); err != nil {
+			return err
+		}
+		if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
+			return err
+		}
+		fmt.Fprintln(a.Out, "removed bootstrap recipe "+args[0])
+		return nil
+	}})
+	return root
 }
 
 func (a *App) versionCommand() *cobra.Command {

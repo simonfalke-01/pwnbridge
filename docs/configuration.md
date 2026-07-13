@@ -1,8 +1,10 @@
 # Configuration
 
 Pwnbridge separates machine-private settings from portable project intent.
-Both formats are strict TOML with `schema = 1`; an unknown key, unsupported
-schema, unsafe value, or invalid combination is an error.
+Both formats are strict TOML; global configuration uses schema 2 and portable
+project configuration remains schema 1. Legacy global schema 1 loads
+transparently and is upgraded atomically on the next write. An unknown key,
+unsupported schema, unsafe value, or invalid combination is an error.
 
 Inspect exactly what is active with:
 
@@ -35,7 +37,7 @@ The global path is `$XDG_CONFIG_HOME/pwnbridge/config.toml`, falling back to
 normally do not need to write it first.
 
 ```toml
-schema = 1
+schema = 2
 default_host = "x86"
 
 [hosts.x86]
@@ -45,6 +47,13 @@ workspace_root = "~/.local/share/pwnbridge/workspaces"
 bootstrap_profile = "pwn"
 shell_transport = "auto"
 mosh_port = "60000:61000"
+
+[bootstrap_profiles.lite]
+schema = 1
+name = "lite"
+components = ["core", "gdb", "python", "pwntools", "patching"]
+system_packages = ["ripgrep"]
+pip_packages = ["ropper==1.13.10"]
 
 [sync]
 engine = "mutagen"

@@ -3,7 +3,7 @@
 ## Supported topology
 
 The supported complete topology is macOS ARM64/AMD64 as client and
-Ubuntu/Debian Linux amd64 as execution host. The client is a native Darwin
+Linux amd64 as execution host. The client is a native Darwin
 binary; the remote agent is a static Linux amd64 binary deployed over SSH.
 
 ## Release archive
@@ -147,16 +147,26 @@ prerequisites when selected. Mosh and forwarding diagnostics do not prevent the
 default predictive inline shell, plain SSH, one-shot runs, or
 `terminal.scope = "remote"` operation.
 
-The profile installs `mosh-server` and standard build/debug packages, creates
-`~/.local/share/pwnbridge/envs/pwn-v1`, and enforces pwntools 4.15.0. The static
-agent is deployed even when `--no-sudo` is used. Optional Pwndbg is pinned and
-checksum verified:
+The default TTY command is an inline wizard. It inventories the host, lets you
+choose `pwn`, `minimal`, a saved recipe, or custom components, then reviews the
+exact install/repair/skip plan before ordinary terminal sudo authentication.
+It never clears the terminal or enters the alternate screen. For automation:
+
+```console
+pwnbridge host bootstrap x86 --interactive=never --profile pwn --yes
+```
+
+The `pwn` recipe installs `mosh-server` and standard build/debug packages,
+creates `~/.local/share/pwnbridge/envs/pwn-v1`, and enforces pwntools 4.15.0.
+Optional Pwndbg is pinned and checksum verified:
 
 ```console
 pwnbridge host bootstrap x86 --with-pwndbg
 ```
 
-Bootstrap is safe to rerun after interruption or during upgrades.
+Bootstrap supports apt, dnf/yum, pacman, zypper, apk, XBPS, Portage, and Nix
+adapters on Linux amd64. It is additive and safe to rerun after interruption.
+Use `pwnbridge config bootstrap` to manage named portable recipes.
 
 Mosh requires inbound UDP. Its default configured range is 60000–61000; allow
 that range in both the host firewall and cloud security group, or narrow

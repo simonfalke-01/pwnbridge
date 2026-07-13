@@ -1,6 +1,6 @@
 # pwnbridge
 
-Pwnbridge makes a native Ubuntu x86-64 pwn environment feel local on an Apple
+Pwnbridge makes a native Linux x86-64 pwn environment feel local on an Apple
 Silicon Mac. Keep your editor, Git checkout, Zellij session, and challenge
 files on macOS; commands, pwntools, GDB, and the inferior run natively on a
 remote Linux amd64 host.
@@ -48,7 +48,7 @@ On the Mac:
 
 On the remote:
 
-- Ubuntu or Debian Linux amd64
+- Linux amd64 with a supported package-manager adapter or safe container/manual alternative
 - an SSH account whose normal OpenSSH configuration already works
 - optional `mosh-server` and inbound UDP 60000–61000 for explicit Mosh
 - roughly 1 GiB free for bootstrap tools
@@ -114,13 +114,15 @@ Then register and prepare it:
 pwnbridge host add x86 pwnbox
 pwnbridge host default x86
 pwnbridge host doctor x86
-pwnbridge host bootstrap x86 --profile pwn
+pwnbridge host bootstrap x86
 ```
 
-`host bootstrap` prints its package plan before invoking sudo. It is
-idempotent, installs a user-owned pwntools 4.15 environment, supports
-`--dry-run`, and can validate an already-prepared host with `--no-sudo`.
-It also installs `mosh-server` and checks reverse forwarding. Open UDP
+On a terminal, `host bootstrap` opens an inline wizard after a read-only host
+inventory. The default `pwn` recipe installs the complete build/debug set and
+Mosh; Pwndbg, Docker, and Podman are opt-in. Automation uses the same
+deterministic plan with `--interactive=never --yes`. `--dry-run` performs only
+the inventory and prints the exact plan, while `--no-sudo` reports all missing
+privileged prerequisites before changing the user-owned environment. Open UDP
 60000–61000 on the host firewall/security group only when using explicit Mosh.
 The default `shell_transport = "auto"` uses pwnbridge predictive echo over an
 inline SSH PTY; one-shot `run` always uses SSH.
@@ -138,17 +140,19 @@ pwnbridge host transport x86 auto
 
 There is no remote Pwnbridge service to install or keep running. On first use,
 the Mac client hashes its bundled static Linux amd64 agent, uploads it over
-your existing SSH connection, verifies the hash on Ubuntu, and atomically
+your existing SSH connection, verifies the hash on Linux, and atomically
 caches it under:
 
 ```text
-~/.local/share/pwnbridge/agents/2/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/3/<sha256>/pwnbridge-agent
 ```
 
-`host bootstrap` separately installs the ordinary Ubuntu/Debian debugger and
-build packages through `apt`, then creates the pinned pwntools environment at
-`~/.local/share/pwnbridge/envs/pwn-v1`. It may use `sudo` only for system
-packages; the agent, Python environment, workspaces, and session state remain
+`host bootstrap` detects apt, dnf/yum, pacman, zypper, apk, XBPS, Portage, or
+Nix and uses fixed package mappings. Unsupported or immutable hosts receive a
+container/manual alternative rather than an unsafe mutation. It then creates
+the pinned pwntools environment at `~/.local/share/pwnbridge/envs/pwn-v1`. It
+may use `sudo` only for system packages and an explicitly accepted Docker
+setup; the agent, Python environment, workspaces, and session state remain
 owned by the SSH user. Bootstrap is idempotent, and future client upgrades
 deploy a new content-addressed agent automatically—no `scp`, remote login,
 system-wide Pwnbridge binary, or persistent daemon is required.

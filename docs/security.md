@@ -177,8 +177,13 @@ loaders, and generated binaries commonly matter during exploitation.
 
 ## Dotfile and package posture
 
-Bootstrap prints its apt plan before sudo and only supports Ubuntu/Debian amd64.
-The user-owned Python environment pins pwntools 4.15.0. Optional Pwndbg is a
+Bootstrap inventories over read-only SSH and passes validated package names as
+separate argv through fixed apt, dnf/yum, pacman, zypper, apk, XBPS, Portage,
+or Nix adapters. It does not add repositories, accept URLs/hooks/templates, or
+collect credentials. One visible `sudo -v` authenticates the ordinary PTY;
+planned commands then use `sudo -n`. Docker-group membership requires a warning
+and explicit acceptance because it is root-equivalent. The user-owned Python
+environment pins pwntools 4.15.0 and runs `pip check`. Optional Pwndbg is a
 pinned portable release whose SHA-256 is embedded and verified before
 extraction. It is exposed through an isolated `pwndbg -nx` wrapper and neither
 edits nor sources a conflicting user `~/.gdbinit`.

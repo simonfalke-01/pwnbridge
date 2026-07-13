@@ -116,11 +116,14 @@ pwnbridge host bootstrap x86 --dry-run
 pwnbridge host doctor x86
 ```
 
-Bootstrap supports Ubuntu/Debian amd64, a writable home, at least 1 GiB free,
-at least 1000 inodes, and apt/sudo unless `--no-sudo` is used. `--no-sudo`
-checks and names every missing executable rather than partly succeeding.
+Bootstrap supports Linux amd64 with apt, dnf/yum, pacman, zypper, apk, XBPS,
+Portage, or Nix, a writable home, at least 1 GiB free, and 1000 inodes.
+Immutable or incompatible hosts receive a safe container/manual alternative.
+`--no-sudo` names every missing privileged component before any user-owned
+mutation. Complete mode-0600 logs are under the XDG state directory; rerun the
+same recipe to resume because healthy steps are skipped.
 
-It is idempotent. Fix the reported apt/network/permission problem and rerun the
+It is idempotent. Fix the reported package-manager/network/permission problem and rerun the
 same command. A failed Pwndbg download leaves only a private temporary directory
 which the command trap removes; the active version changes only after checksum
 verification and complete extraction.

@@ -7,8 +7,11 @@ var (
 )
 
 const (
-	ConfigSchema     = 1
-	ProtocolVersion  = 2
+	GlobalConfigSchema  = 2
+	ProjectConfigSchema = 1
+	// ConfigSchema is retained for version output and means the global schema.
+	ConfigSchema     = GlobalConfigSchema
+	ProtocolVersion  = 3
 	ProviderProtocol = 1
 	MutagenVersion   = "0.18.1"
 )

@@ -99,6 +99,34 @@ type CleanupRequest struct {
 	Runtime    RuntimeSpec `json:"runtime"`
 }
 
+// BootstrapRequest is the UI-independent execution contract. Arguments and
+// environment values are discrete fields; agents never evaluate user-provided
+// command templates.
+type BootstrapRequest struct {
+	Recipe           string          `json:"recipe"`
+	AuthenticateSudo bool            `json:"authenticate_sudo"`
+	Steps            []BootstrapStep `json:"steps"`
+}
+
+type BootstrapStep struct {
+	ID          string            `json:"id"`
+	Component   string            `json:"component"`
+	Description string            `json:"description"`
+	Args        []string          `json:"args"`
+	Environment map[string]string `json:"environment,omitempty"`
+	Sudo        bool              `json:"sudo"`
+}
+
+type BootstrapEvent struct {
+	Type        string `json:"type"`
+	StepID      string `json:"step_id,omitempty"`
+	Component   string `json:"component,omitempty"`
+	Description string `json:"description,omitempty"`
+	Output      string `json:"output,omitempty"`
+	ExitCode    int    `json:"exit_code,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
 type OpenPayload struct {
 	Title string `json:"title,omitempty"`
 }

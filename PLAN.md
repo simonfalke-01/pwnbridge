@@ -1,6 +1,6 @@
 # pwnbridge — Comprehensive Project Plan
 
-**Status:** Implemented and acceptance-tested
+**Status:** Implemented and acceptance-tested, including interactive cross-distro bootstrap
 **Last updated:** 2026-07-13
 **Canonical project name:** `pwnbridge`
 
@@ -208,7 +208,7 @@ PWNBRIDGE_RUNTIME
 Path: `$XDG_CONFIG_HOME/pwnbridge/config.toml`, falling back to `~/.config/pwnbridge/config.toml`.
 
 ```toml
-schema = 1
+schema = 2
 default_host = "x86"
 
 [hosts.x86]
@@ -513,7 +513,8 @@ Probe OS/architecture, upload to a temporary user-owned path, verify SHA-256 rem
 
 ### 9.3 Bootstrap profile
 
-The Ubuntu/Debian `pwn` profile verifies or installs:
+The cross-distribution `pwn` recipe verifies or installs manager-specific
+equivalents of:
 
 ```text
 build-essential cmake file binutils gdb gdbserver gdb-multiarch patchelf checksec
@@ -521,12 +522,14 @@ python3 python3-dev python3-venv python3-pip python3-pwntools libssl-dev libffi-
 strace ltrace socat netcat-openbsd libc6-dbg
 ```
 
-It creates a user-owned virtual environment with pinned pwntools 4.15.0. The
+It also includes Git, curl, certificates, xz, and Mosh, and creates a user-owned
+virtual environment with pinned pwntools 4.15.0. The
 checksum-verified Pwndbg profile is optional; any existing GEF/PEDA setup stays
 user-owned and isolated from it. Bootstrap checks distro, amd64 architecture,
 disk/inodes, home/workspace permissions, forwarding, ptrace, GDB, gdbserver,
-and any configured container engine. Without sudo it still deploys the agent
-and reports exact missing tools.
+and selected container components. Apt, dnf/yum, pacman, zypper, apk, XBPS,
+Portage, and Nix adapters use fixed argv and configured repositories. Without
+sudo it reports all privileged blockers before any user-owned mutation.
 
 ## 10. Pwntools and terminal broker
 

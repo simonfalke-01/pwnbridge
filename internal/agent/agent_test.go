@@ -34,6 +34,23 @@ func TestRequestRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestBootstrapStepValidation(t *testing.T) {
+	good := protocol.BootstrapStep{ID: "packages-install", Args: []string{"apt-get", "install", "-y", "gdb"}, Environment: map[string]string{"DEBIAN_FRONTEND": "noninteractive"}}
+	if !validBootstrapStep(good) {
+		t.Fatal("valid structured bootstrap step was rejected")
+	}
+	bad := good
+	bad.Environment = map[string]string{"BAD-NAME": "value"}
+	if validBootstrapStep(bad) {
+		t.Fatal("invalid environment name was accepted")
+	}
+	bad = good
+	bad.Args = []string{"apt-get", "bad\x00arg"}
+	if validBootstrapStep(bad) {
+		t.Fatal("NUL argument was accepted")
+	}
+}
+
 func TestManagedBashRCHasConciseSafePrompt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bashrc")
 	if err := writeBashRC(path, "0123456789abcdef", "lima-x86", "ret2win", true, false); err != nil {

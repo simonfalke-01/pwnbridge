@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+	bootstraprecipe "github.com/simonfalke-01/pwnbridge/internal/bootstrap/recipe"
 	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/paths"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
@@ -88,12 +89,13 @@ type Shell struct {
 }
 
 type Global struct {
-	Schema      int             `toml:"schema" json:"schema"`
-	DefaultHost string          `toml:"default_host,omitempty" json:"default_host"`
-	Hosts       map[string]Host `toml:"hosts,omitempty" json:"hosts"`
-	Sync        Sync            `toml:"sync" json:"sync"`
-	Terminal    Terminal        `toml:"terminal" json:"terminal"`
-	Runtime     Runtime         `toml:"runtime" json:"runtime"`
+	Schema            int                               `toml:"schema" json:"schema"`
+	DefaultHost       string                            `toml:"default_host,omitempty" json:"default_host"`
+	Hosts             map[string]Host                   `toml:"hosts,omitempty" json:"hosts"`
+	Sync              Sync                              `toml:"sync" json:"sync"`
+	Terminal          Terminal                          `toml:"terminal" json:"terminal"`
+	Runtime           Runtime                           `toml:"runtime" json:"runtime"`
+	BootstrapProfiles map[string]bootstraprecipe.Recipe `toml:"bootstrap_profiles,omitempty" json:"bootstrap_profiles,omitempty"`
 }
 
 type Project struct {
@@ -120,8 +122,8 @@ type Effective struct {
 func Defaults() Effective {
 	return Effective{
 		Global: Global{
-			Schema: version.ConfigSchema,
-			Hosts:  map[string]Host{},
+			Schema: version.GlobalConfigSchema,
+			Hosts:  map[string]Host{}, BootstrapProfiles: map[string]bootstraprecipe.Recipe{},
 			Sync: Sync{
 				Engine: "mutagen", Mode: "two-way-safe", WatchMode: "portable",
 				SymlinkMode: "portable", PauseOnIdle: false,
@@ -136,7 +138,7 @@ func Defaults() Effective {
 			Runtime: Runtime{Kind: "host", Container: Container{Engine: "auto", Workdir: "/work", Network: "bridge"}},
 		},
 		Project: Project{
-			Schema: version.ConfigSchema, Target: "linux/amd64",
+			Schema: version.ProjectConfigSchema, Target: "linux/amd64",
 			Workspace:   Workspace{Root: "."},
 			Environment: Environment{Profile: "pwn", Set: map[string]string{}},
 			Shell:       Shell{Command: "bash", SourceUserRC: true},
@@ -149,12 +151,13 @@ func Defaults() Effective {
 
 // Layer types use pointers so false and empty values can intentionally override defaults.
 type globalLayer struct {
-	Schema      *int            `toml:"schema"`
-	DefaultHost *string         `toml:"default_host"`
-	Hosts       map[string]Host `toml:"hosts"`
-	Sync        *syncLayer      `toml:"sync"`
-	Terminal    *terminalLayer  `toml:"terminal"`
-	Runtime     *runtimeLayer   `toml:"runtime"`
+	Schema            *int                              `toml:"schema"`
+	DefaultHost       *string                           `toml:"default_host"`
+	Hosts             map[string]Host                   `toml:"hosts"`
+	Sync              *syncLayer                        `toml:"sync"`
+	Terminal          *terminalLayer                    `toml:"terminal"`
+	Runtime           *runtimeLayer                     `toml:"runtime"`
+	BootstrapProfiles map[string]bootstraprecipe.Recipe `toml:"bootstrap_profiles"`
 }
 
 type projectLayer struct {
@@ -281,6 +284,32 @@ func Load(cwd string, p paths.Paths) (Effective, error) {
 	return e, nil
 }
 
+// LoadGlobal loads only XDG global configuration. Host inventory, doctor, and
+// bootstrap intentionally do not depend on finding or validating a project in
+// the caller's current directory.
+func LoadGlobal(p paths.Paths) (Effective, error) {
+	e := Defaults()
+	globalPath := os.Getenv("PWNBRIDGE_CONFIG")
+	if globalPath == "" {
+		globalPath = filepath.Join(p.Config, "config.toml")
+	}
+	e.GlobalPath = globalPath
+	var layer globalLayer
+	if err := decodeOptional(globalPath, &layer); err != nil {
+		return Effective{}, err
+	}
+	if err := applyGlobal(&e.Global, layer); err != nil {
+		return Effective{}, fmt.Errorf("global config: %w", err)
+	}
+	if value := os.Getenv("PWNBRIDGE_AGENT_PATH"); value != "" {
+		e.AgentPath = value
+	}
+	if err := e.Validate(); err != nil {
+		return Effective{}, err
+	}
+	return e, nil
+}
+
 func decodeOptional(path string, target any) error {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -320,10 +349,12 @@ func FindProject(start string) (configPath, root string, err error) {
 
 func applyGlobal(dst *Global, src globalLayer) error {
 	if src.Schema != nil {
-		if *src.Schema != version.ConfigSchema {
+		if *src.Schema != 1 && *src.Schema != version.GlobalConfigSchema {
 			return fmt.Errorf("unsupported schema %d", *src.Schema)
 		}
-		dst.Schema = *src.Schema
+		// Schema 1 is intentionally upgraded only in memory. The next ordinary
+		// atomic write persists schema 2 without a migration-side-effect on load.
+		dst.Schema = version.GlobalConfigSchema
 	}
 	if src.DefaultHost != nil {
 		dst.DefaultHost = *src.DefaultHost
@@ -347,12 +378,20 @@ func applyGlobal(dst *Global, src globalLayer) error {
 	if src.Runtime != nil {
 		applyRuntime(&dst.Runtime, *src.Runtime)
 	}
+	if src.BootstrapProfiles != nil {
+		if dst.BootstrapProfiles == nil {
+			dst.BootstrapProfiles = map[string]bootstraprecipe.Recipe{}
+		}
+		for name, value := range src.BootstrapProfiles {
+			dst.BootstrapProfiles[name] = value
+		}
+	}
 	return nil
 }
 
 func applyProject(dst *Project, src projectLayer) error {
 	if src.Schema != nil {
-		if *src.Schema != version.ConfigSchema {
+		if *src.Schema != version.ProjectConfigSchema {
 			return fmt.Errorf("unsupported schema %d", *src.Schema)
 		}
 		dst.Schema = *src.Schema
@@ -499,8 +538,11 @@ func applyEnvironment(e *Effective) {
 
 func (e Effective) Validate() error {
 	var problems []string
-	if e.Global.Schema != version.ConfigSchema || e.Project.Schema != version.ConfigSchema {
-		problems = append(problems, "schema must be 1")
+	if e.Global.Schema != version.GlobalConfigSchema {
+		problems = append(problems, "global schema must be 2")
+	}
+	if e.Project.Schema != version.ProjectConfigSchema {
+		problems = append(problems, "project schema must be 1")
 	}
 	if e.Project.Target != "linux/amd64" {
 		problems = append(problems, "target must be linux/amd64")
@@ -610,14 +652,31 @@ func (e Effective) Validate() error {
 		if host.WorkspaceRoot != "" && !validRemoteWorkspaceRoot(host.WorkspaceRoot) {
 			problems = append(problems, fmt.Sprintf("hosts.%s.workspace_root must be a safe ~/... or absolute path", name))
 		}
-		if host.BootstrapProfile != "" && host.BootstrapProfile != "pwn" {
-			problems = append(problems, fmt.Sprintf("hosts.%s.bootstrap_profile must be pwn", name))
+		if host.BootstrapProfile != "" && host.BootstrapProfile != "pwn" && host.BootstrapProfile != "minimal" {
+			if _, ok := e.Global.BootstrapProfiles[host.BootstrapProfile]; !ok {
+				problems = append(problems, fmt.Sprintf("hosts.%s.bootstrap_profile references unknown recipe %q", name, host.BootstrapProfile))
+			}
 		}
 		if host.ShellTransport != "" && !oneOf(host.ShellTransport, "auto", "ssh", "mosh") {
 			problems = append(problems, fmt.Sprintf("hosts.%s.shell_transport must be auto, ssh, or mosh", name))
 		}
 		if host.MoshPort != "" && !validMoshPort(host.MoshPort) {
 			problems = append(problems, fmt.Sprintf("hosts.%s.mosh_port must be a UDP port or ascending range", name))
+		}
+	}
+	for name, value := range e.Global.BootstrapProfiles {
+		if !bootstraprecipe.ValidName(name) {
+			problems = append(problems, fmt.Sprintf("invalid bootstrap recipe name %q", name))
+			continue
+		}
+		if name == "pwn" || name == "minimal" {
+			problems = append(problems, fmt.Sprintf("bootstrap recipe %q shadows a built-in", name))
+		}
+		if value.Name != name {
+			problems = append(problems, fmt.Sprintf("bootstrap recipe %q has mismatched embedded name %q", name, value.Name))
+		}
+		if err := bootstraprecipe.ValidatePortable(value); err != nil {
+			problems = append(problems, fmt.Sprintf("bootstrap recipe %q: %v", name, err))
 		}
 	}
 	if len(problems) > 0 {
@@ -747,7 +806,7 @@ func unsafeArgument(value string, maximum int) bool {
 }
 
 func SaveGlobal(path string, g Global) error {
-	g.Schema = version.ConfigSchema
+	g.Schema = version.GlobalConfigSchema
 	if g.Sync.BarrierText == "" {
 		g.Sync.BarrierText = g.Sync.BarrierTimeout.String()
 	}
@@ -759,7 +818,7 @@ func SaveGlobal(path string, g Global) error {
 }
 
 func SaveProject(path string, p Project) error {
-	p.Schema = version.ConfigSchema
+	p.Schema = version.ProjectConfigSchema
 	data, err := toml.Marshal(p)
 	if err != nil {
 		return fmt.Errorf("encode project config: %w", err)

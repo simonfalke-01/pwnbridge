@@ -229,6 +229,37 @@ func TestMoshPortValidation(t *testing.T) {
 	}
 }
 
+func TestLegacyGlobalSchemaMigratesOnWriteOnly(t *testing.T) {
+	root := t.TempDir()
+	p := testPaths(root)
+	if err := os.MkdirAll(p.Config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(p.Config, "config.toml")
+	legacy := []byte("schema=1\n")
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	effective, err := LoadGlobal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.Global.Schema != 2 {
+		t.Fatalf("in-memory schema = %d", effective.Global.Schema)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != string(legacy) {
+		t.Fatal("read-only load rewrote global config")
+	}
+	if err := SaveGlobal(path, effective.Global); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "schema = 2") {
+		t.Fatalf("write did not migrate schema: %s", data)
+	}
+}
+
 func FuzzStrictProjectTOML(f *testing.F) {
 	f.Add([]byte("schema=1\ntarget='linux/amd64'\n[runtime]\nkind='host'\n"))
 	f.Add([]byte("schema=999\nunknown=true\n"))

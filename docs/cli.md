@@ -66,10 +66,14 @@ pwnbridge host use NAME
 pwnbridge host use --default
 pwnbridge host remove NAME
 pwnbridge host doctor NAME [--json]
-pwnbridge host bootstrap NAME [--profile pwn]
-                              [--with-pwndbg]
-                              [--dry-run]
-                              [--no-sudo]
+pwnbridge host bootstrap NAME [--interactive auto|always|never]
+                              [--profile NAME | --recipe-file FILE]
+                              [--with COMPONENT]... [--without COMPONENT]...
+                              [--apt-package PACKAGE]... [--pip-package REQUIREMENT]...
+                              [--save-profile NAME] [--with-pwndbg]
+                              [--no-sudo] [--dry-run] [--yes]
+                              [--accept-docker-root-risk]
+                              [--accessible] [--verbose] [--json]
 ```
 
 `add` writes machine-private global config. The first host becomes the default.
@@ -78,11 +82,17 @@ an ordinary OpenSSH alias or `user@host` and cannot begin with an option.
 `default` changes the machine-wide fallback. `use NAME` writes an override for
 the current project only, and `use --default` removes that override. In `host
 list`, `*` marks the machine default and `>` marks the current project's
-effective host. `bootstrap --dry-run` does not deploy or mutate; `--no-sudo`
-skips apt and reports missing prerequisites; the only profile is `pwn`.
-Doctor/bootstrap probe reverse forwarding; unavailable forwarding is fatal to
-host-pane diagnostics but not to shell/run or explicit remote-multiplexer
-scope.
+effective host. `bootstrap --dry-run` performs a read-only SSH inventory and
+never deploys the agent, invokes sudo, refreshes repositories, installs, or
+writes recipes. Non-interactive application requires `--yes`; JSON implies
+non-interactive and reserves stdout for one result envelope. `--with-pwndbg`
+aliases `--with pwndbg`. Explicit component and `--no-sudo` constraints are
+locked in the wizard. Recipe precedence is component/package flags, recipe
+file, explicit profile, host-bound profile, then built-in `pwn`.
+
+Recipe commands are `config bootstrap list`, `show NAME [--json]`, `import
+FILE [--name NAME] [--replace]`, `export NAME [--output FILE|-]`, and `remove
+NAME`.
 
 `auto` is the default interactive transport and uses pwnbridge predictive echo
 over an inline SSH PTY. `ssh` uses the same PTY without prediction. `mosh`
