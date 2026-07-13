@@ -5,15 +5,15 @@
 class Pwnbridge < Formula
   desc "Make a remote Linux x86-64 pwn environment feel local on macOS"
   homepage "https://github.com/simonfalke-01/pwnbridge"
-  version "0.1.12"
+  version "0.1.13"
   license "MIT"
 
   if Hardware::CPU.arm?
-    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.12/pwnbridge_0.1.12_darwin_arm64.tar.gz"
-    sha256 "28e3cca49b6f7feab2ca2e5f3a97aa92eb4d818b6b5a67be22550ee30d27d3ff"
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.13/pwnbridge_0.1.13_darwin_arm64.tar.gz"
+    sha256 "9a3754e14c6af070996522ea7a7ba78a17bfe24fb54d706a3749fbcff3de8e2a"
   else
-    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.12/pwnbridge_0.1.12_darwin_amd64.tar.gz"
-    sha256 "7e33bb70fde8c8247c5c4d18b222cad5decf2c18246685b53a7021c432daac87"
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.13/pwnbridge_0.1.13_darwin_amd64.tar.gz"
+    sha256 "bcc808cd94eb1043ae78f5b917411aec21bafdf4d5606dca2057a8c0a3dc2372"
   end
 
   depends_on "mosh"
