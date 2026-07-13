@@ -462,19 +462,31 @@ func FindAgentAsset(explicit string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	candidates := []string{
-		filepath.Join(filepath.Dir(executable), "pwnbridge-agent-linux-amd64"),
-		filepath.Join(filepath.Dir(filepath.Dir(executable)), "libexec", "pwnbridge", "pwnbridge-agent-linux-amd64"),
-		filepath.Join(filepath.Dir(executable), "..", "libexec", "pwnbridge", "pwnbridge-agent-linux-amd64"),
-	}
 	if runtime.GOOS == "darwin" {
-		for _, candidate := range candidates {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return filepath.Clean(candidate), nil
-			}
+		if asset, ok := findAgentAssetFromExecutable(executable); ok {
+			return asset, nil
 		}
 	}
 	return "", errors.New("Linux agent asset not found; run `make build` or set PWNBRIDGE_AGENT_PATH")
+}
+
+func findAgentAssetFromExecutable(executable string) (string, bool) {
+	executables := []string{executable}
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil && resolved != executable {
+		executables = append(executables, resolved)
+	}
+	for _, path := range executables {
+		candidates := []string{
+			filepath.Join(filepath.Dir(path), "pwnbridge-agent-linux-amd64"),
+			filepath.Join(filepath.Dir(filepath.Dir(path)), "libexec", "pwnbridge", "pwnbridge-agent-linux-amd64"),
+		}
+		for _, candidate := range candidates {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return filepath.Clean(candidate), true
+			}
+		}
+	}
+	return "", false
 }
 
 func CopyOutput(dst io.Writer, out []byte) { _, _ = dst.Write(out) }

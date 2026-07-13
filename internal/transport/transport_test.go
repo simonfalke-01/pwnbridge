@@ -37,6 +37,40 @@ func TestCanceledCommandsPreserveContextError(t *testing.T) {
 	}
 }
 
+func TestFindAgentAssetResolvesHomebrewExecutableSymlink(t *testing.T) {
+	root := t.TempDir()
+	cellar := filepath.Join(root, "Cellar", "pwnbridge", "0.1.1")
+	executable := filepath.Join(cellar, "bin", "pwnbridge")
+	agent := filepath.Join(cellar, "libexec", "pwnbridge", "pwnbridge-agent-linux-amd64")
+	if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(agent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("client"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(agent, []byte("agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkedExecutable := filepath.Join(root, "bin", "pwnbridge")
+	if err := os.MkdirAll(filepath.Dir(linkedExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(executable, linkedExecutable); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := findAgentAssetFromExecutable(linkedExecutable)
+	want, err := filepath.EvalSymlinks(agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || got != want {
+		t.Fatalf("got asset %q, ok=%t; want %q", got, ok, want)
+	}
+}
+
 func TestRemoteAgentCommandQuotesRequest(t *testing.T) {
 	got := remoteAgentCommand("~/.local/share/pwnbridge/agent", "exec", "abc_DEF-123")
 	want := `exec "$HOME"/'.local/share/pwnbridge/agent' 'exec' 'abc_DEF-123'`
