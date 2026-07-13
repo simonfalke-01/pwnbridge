@@ -40,7 +40,7 @@ func (p Proxy) Run(ctx context.Context, cmd *exec.Cmd) error {
 	}
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
-		return fmt.Errorf("start SSH PTY: %w", err)
+		return fmt.Errorf("start terminal transport PTY: %w", err)
 	}
 	defer ptmx.Close()
 
@@ -67,6 +67,10 @@ func (p Proxy) Run(ctx context.Context, cmd *exec.Cmd) error {
 	outputDone := make(chan struct{})
 	go func() {
 		defer close(outputDone)
+		if p.Nonce == "" {
+			_, _ = io.Copy(p.Out, ptmx)
+			return
+		}
 		parser := NewMarkerParser(p.Nonce)
 		buffer := make([]byte, 32*1024)
 		for {

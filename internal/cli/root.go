@@ -67,6 +67,7 @@ type activeSession struct {
 	Record     broker.SessionRecord
 	Broker     *broker.Broker
 	Master     *transport.Master
+	Probe      transport.HostProbe
 	Lease      *workspace.Lock
 	closed     bool
 }
@@ -99,7 +100,7 @@ func (a *App) Root() *cobra.Command {
 	root.Flags().BoolP("version", "v", false, "version for pwnbridge")
 	root.PersistentFlags().StringVar(&a.HostFlag, "host", "", "override the configured remote host")
 	root.AddCommand(
-		&cobra.Command{Use: "shell", Short: "Open the managed remote shell", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
+		&cobra.Command{Use: "shell", Short: "Open the managed shell (Mosh with SSH fallback)", Long: "Open managed remote Bash. The selected host's shell_transport setting chooses predictive Mosh or SSH; auto prefers Mosh and safely falls back to SSH when its prerequisites are unavailable.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
 		a.runCommand(), a.initCommand(), a.statusCommand(), a.doctorCommand(), a.stopCommand(), a.cleanCommand(),
 		a.hostCommand(), a.syncCommand(), a.terminalCommand(), a.runtimeCommand(), a.configCommand(), a.versionCommand(),
 		a.paneCommand(),
@@ -446,7 +447,7 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 	if err := broker.SaveSession(recordPath, record); err != nil {
 		return nil, err
 	}
-	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Lease: lease}, nil
+	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Probe: probe, Lease: lease}, nil
 }
 
 func (s *activeSession) runtimeSpec() protocol.RuntimeSpec {
@@ -556,19 +557,57 @@ func (a *App) shell(ctx context.Context) (result error) {
 		}
 		cleanupProgress.Stop()
 	}()
-	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, PromptHost: p.HostID, PromptPath: p.WS.Slug, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
+	selectedTransport, err := shellTransport(p.Host, p.Config.Global.Terminal.Scope, session)
+	if err != nil {
+		return err
+	}
+	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, PromptHost: p.HostID, PromptPath: p.WS.Slug, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec(), RemoteBarrier: selectedTransport == "mosh"}
 	encoded, err := agent.EncodeRequest(request)
 	if err != nil {
 		return err
 	}
 	cmd := session.Master.Command(ctx, true, "shell", encoded)
 	proxy := shell.Proxy{In: a.In, Out: a.Out, Err: a.Err, Nonce: session.Nonce, Barrier: func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }}
+	if selectedTransport == "mosh" {
+		progress.Stage("Opening Mosh shell")
+		cmd = session.Master.MoshCommand(ctx, "shell", encoded, p.Host.MoshPort)
+		proxy.Nonce, proxy.Barrier = "", nil
+	}
 	progress.Stop()
 	if err := proxy.Run(ctx, cmd); ctx.Err() != nil {
 		return ctx.Err()
 	} else {
 		return err
 	}
+}
+
+func shellTransport(host config.Host, terminalScope string, session *activeSession) (string, error) {
+	wanted := host.ShellTransport
+	if wanted == "" {
+		wanted = "auto"
+	}
+	if wanted == "ssh" {
+		return "ssh", nil
+	}
+	var reason string
+	switch {
+	case terminalScope == "remote":
+		reason = "terminal.scope=remote uses SSH because remote multiplexer control is not compatible with Mosh"
+	case session.Broker == nil || session.Record.RemoteSocket == "":
+		reason = "the authenticated synchronization bridge is unavailable (check reverse SSH forwarding)"
+	case !transport.MoshAvailable(session.Master.Client, session.Probe):
+		if !transport.LocalMoshAvailable(session.Master.Client) {
+			reason = "the local mosh client is not installed"
+		} else {
+			reason = "mosh-server is not installed on the remote host"
+		}
+	default:
+		return "mosh", nil
+	}
+	if wanted == "mosh" {
+		return "", fmt.Errorf("Mosh shell requested but %s", reason)
+	}
+	return "ssh", nil
 }
 
 func (a *App) runCommand() *cobra.Command {
@@ -705,7 +744,7 @@ func (a *App) doctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		checks := diagnostics.Local(cmd.Context(), p.Sync)
+		checks := diagnostics.Local(cmd.Context(), p.Sync, p.Host.ShellTransport)
 		if p.HostID != "" {
 			client := transport.New(p.Host.Destination, "")
 			var agentErr error
@@ -718,7 +757,7 @@ func (a *App) doctorCommand() *cobra.Command {
 			} else {
 				agentErr = assetErr
 			}
-			checks = append(checks, diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote")...)
+			checks = append(checks, diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote", p.Host.ShellTransport)...)
 			if agentErr != nil {
 				checks = append(checks, diagnostics.Check{Name: "diagnostic-agent", OK: false, Detail: agentErr.Error(), Remediation: "run make build or reinstall pwnbridge"})
 			}
@@ -806,12 +845,46 @@ func (a *App) cleanCommand() *cobra.Command {
 
 func (a *App) hostCommand() *cobra.Command {
 	host := &cobra.Command{Use: "host", Short: "Manage remote hosts"}
-	host.AddCommand(a.hostAdd(), a.hostList(), a.hostShow(), a.hostDefault(), a.hostUse(), a.hostRemove(), a.hostDoctor(), a.hostBootstrap())
+	host.AddCommand(a.hostAdd(), a.hostList(), a.hostShow(), a.hostTransport(), a.hostDefault(), a.hostUse(), a.hostRemove(), a.hostDoctor(), a.hostBootstrap())
 	return host
 }
 
+func (a *App) hostTransport() *cobra.Command {
+	var moshPort string
+	cmd := &cobra.Command{Use: "transport NAME auto|mosh|ssh", Short: "Set a host's interactive shell transport", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		p, err := a.loadProject(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
+		host, ok := p.Config.Global.Hosts[args[0]]
+		if !ok {
+			return fmt.Errorf("unknown host %q", args[0])
+		}
+		host.ShellTransport = args[1]
+		if cmd.Flags().Changed("mosh-port") {
+			host.MoshPort = moshPort
+		}
+		p.Config.Global.Hosts[args[0]] = host
+		if err := p.Config.Validate(); err != nil {
+			return err
+		}
+		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
+			return err
+		}
+		port := host.MoshPort
+		if port == "" {
+			port = "60000:61000"
+		}
+		fmt.Fprintf(a.Out, "host %s shell transport: %s (Mosh UDP %s)\n", args[0], host.ShellTransport, port)
+		return nil
+	}}
+	cmd.Flags().StringVar(&moshPort, "mosh-port", "", "remote UDP port or range for Mosh")
+	return cmd
+}
+
 func (a *App) hostAdd() *cobra.Command {
-	return &cobra.Command{Use: "add NAME DESTINATION", Short: "Register a remote host", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	var shellTransport, moshPort string
+	cmd := &cobra.Command{Use: "add NAME DESTINATION", Short: "Register or replace a remote host", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		e, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -820,7 +893,7 @@ func (a *App) hostAdd() *cobra.Command {
 		if !config.ValidHostName(name) {
 			return errors.New("host name must be 1-64 ASCII letters, digits, '.', '_', or '-'")
 		}
-		e.Config.Global.Hosts[name] = config.Host{Destination: args[1], Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn"}
+		e.Config.Global.Hosts[name] = config.Host{Destination: args[1], Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn", ShellTransport: shellTransport, MoshPort: moshPort}
 		if e.Config.Global.DefaultHost == "" {
 			e.Config.Global.DefaultHost = name
 		}
@@ -838,6 +911,9 @@ func (a *App) hostAdd() *cobra.Command {
 		fmt.Fprintf(a.Out, "added host %s (%s)\n", name, args[1])
 		return nil
 	}}
+	cmd.Flags().StringVar(&shellTransport, "shell-transport", "auto", "interactive shell transport: auto, mosh, or ssh")
+	cmd.Flags().StringVar(&moshPort, "mosh-port", "60000:61000", "remote UDP port or range for Mosh")
+	return cmd
 }
 
 func (a *App) hostList() *cobra.Command {
@@ -885,7 +961,15 @@ func (a *App) hostShow() *cobra.Command {
 		if asJSON {
 			return writeJSON(a.Out, host)
 		}
-		fmt.Fprintf(a.Out, "destination: %s\nplatform: %s\nworkspace root: %s\n", host.Destination, host.Platform, host.WorkspaceRoot)
+		transportName := host.ShellTransport
+		if transportName == "" {
+			transportName = "auto"
+		}
+		moshPort := host.MoshPort
+		if moshPort == "" {
+			moshPort = "60000:61000"
+		}
+		fmt.Fprintf(a.Out, "destination: %s\nplatform: %s\nworkspace root: %s\nshell transport: %s\nmosh UDP ports: %s\n", host.Destination, host.Platform, host.WorkspaceRoot, transportName, moshPort)
 		return nil
 	}}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
@@ -998,7 +1082,7 @@ func (a *App) hostDoctor() *cobra.Command {
 			return fmt.Errorf("deploy diagnostic agent: %w", deployErr)
 		}
 		client.AgentPath = remoteAgent
-		checks := diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote")
+		checks := diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote", host.ShellTransport)
 		if asJSON {
 			if err := writeJSON(a.Out, map[string]any{"ok": diagnostics.Healthy(checks), "checks": checks}); err != nil {
 				return err

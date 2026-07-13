@@ -1,0 +1,46 @@
+#!/usr/bin/expect -f
+set timeout 90
+
+set root $env(PWNBRIDGE_E2E_ROOT)
+spawn -noecho $root/bin/pwnbridge
+stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    -re {[$#] } {}
+    timeout { puts stderr "Mosh managed shell did not present a prompt"; exit 1 }
+    eof { puts stderr "Mosh managed shell exited before prompt"; exit 1 }
+}
+
+set f [open "mosh-save-barrier.txt" "w"]
+puts -nonewline $f "fresh-local-content"
+close $f
+send -- "cat mosh-save-barrier.txt\r"
+expect {
+    -re {fresh-local-content} {}
+    timeout { puts stderr "Mosh pre-command barrier failed"; exit 1 }
+}
+expect -re {[$#] }
+
+send -- "printf remote-mosh-content > mosh-prompt-artifact.txt\r"
+expect -re {[$#] }
+if {![file exists "mosh-prompt-artifact.txt"]} {
+    puts stderr "Mosh post-command barrier did not synchronize artifact"
+    exit 1
+}
+set f [open "mosh-prompt-artifact.txt" "r"]
+set content [read $f]
+close $f
+if {$content ne "remote-mosh-content"} {
+    puts stderr "Mosh artifact content mismatch: $content"
+    exit 1
+}
+
+stty rows 40 columns 120 < $spawn_out(slave,name)
+after 500
+send -- "stty size\r"
+expect {
+    -re {40 120} {}
+    timeout { puts stderr "Mosh PTY size was not propagated"; exit 1 }
+}
+expect -re {[$#] }
+send -- "exit\r"
+expect eof

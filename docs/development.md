@@ -39,9 +39,9 @@ Package tests include:
 - strict config precedence/schema/value validation;
 - workspace identity, state, locks, and safe recovery copies;
 - Mutagen version/argv/health/conflict parsing with captured 0.18.1 fixtures;
-- OpenSSH/scp argv, agent deployment, stream-local and TCP/socat fallback;
+- OpenSSH/scp and Mosh argv, agent deployment, stream-local and TCP/socat fallback;
 - PTY marker chunk boundaries and terminal restoration;
-- broker authentication, rate/pane limits, lifecycle, and runtime authority;
+- broker authentication, shell barriers, rate/pane limits, lifecycle, and runtime authority;
 - fake Zellij/tmux/WezTerm/Kitty/iTerm/Terminal/custom provider lifecycle;
 - Docker/Podman command construction and same-runtime cwd/environment;
 - hostile IDs, path escapes, frame caps, and broker-address validation.
@@ -65,7 +65,8 @@ Individual scenarios:
 | Script | Coverage |
 |---|---|
 | `lima.sh` | real ret2win, x86-64, artifacts, conflicts/spaces, root deletion |
-| `lima-shell.sh` | save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
+| `lima-shell.sh` | SSH save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
+| `lima-mosh.sh` | predictive Mosh shell, remote pre/post barriers, artifacts, resize |
 | `lima-disconnect.sh` | forced SSH-master loss, terminal restoration, reconnect, preserved data |
 | `lima-gdb.sh` | debug, attach, API, concurrent panes, selectable host provider |
 | `lima-gdb-tui.sh` | real GDB TUI PTY and 30x90 to 45x120 resize propagation |
@@ -80,6 +81,10 @@ Individual scenarios:
 The full container GDB test expects an image tagged
 `localhost/pwnbridge-pwn:e2e` on the VM. Build it from the supplied Dockerfile
 with Podman before running the aggregate target.
+
+The Mosh case requires `mosh-server` in the guest and local `mosh`/`socat`.
+When Lima uses QEMU user networking, the script temporarily forwards UDP 60000
+through the VM's private QMP socket and removes the forward during cleanup.
 
 Run the GDB suite through real host Zellij from a Zellij pane:
 
@@ -112,7 +117,7 @@ registry attestation.
 ## Code conventions
 
 - Prefer standard library and small dependencies.
-- Keep OpenSSH and Mutagen behind narrow adapters; do not embed them.
+- Keep OpenSSH, Mosh, and Mutagen behind narrow adapters; do not embed them.
 - Represent commands as argv until a remote fixed housekeeping shell is
   unavoidable, then single-quote every variable path.
 - Make every data-loss decision explicit.
@@ -130,7 +135,7 @@ internal/cli/           orchestration and public commands
 internal/config/        strict typed TOML and precedence
 internal/workspace/     identity, locks, state, bindings
 internal/syncer/        Mutagen 0.18.1 adapter and health model
-internal/transport/     OpenSSH master/forwarding/agent deployment
+internal/transport/     OpenSSH control/forwarding, Mosh PTY, agent deployment
 internal/shell/         marker parser and PTY proxy
 internal/broker/        authenticated debugger lifecycle broker
 internal/terminal/      host provider implementations

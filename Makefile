@@ -63,6 +63,7 @@ e2e-lima: build
 	: "$${PWNBRIDGE_E2E_SSH_CONFIG:?set PWNBRIDGE_E2E_SSH_CONFIG}"
 	test/e2e/lima.sh
 	test/e2e/lima-shell.sh
+	test/e2e/lima-mosh.sh
 	test/e2e/lima-disconnect.sh
 	test/e2e/lima-gdb.sh
 	test/e2e/lima-gdb-tui.sh

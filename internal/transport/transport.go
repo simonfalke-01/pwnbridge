@@ -25,6 +25,7 @@ import (
 type Client struct {
 	SSH         string
 	SCP         string
+	Mosh        string
 	Destination string
 	AgentPath   string
 	ControlPath string
@@ -58,7 +59,7 @@ type Master struct {
 }
 
 func New(destination, agentPath string) Client {
-	return Client{SSH: "ssh", SCP: "scp", Destination: destination, AgentPath: agentPath}
+	return Client{SSH: "ssh", SCP: "scp", Mosh: "mosh", Destination: destination, AgentPath: agentPath}
 }
 
 func (c Client) BasicProbe(ctx context.Context) (HostProbe, error) {
@@ -354,6 +355,45 @@ func (m *Master) Command(ctx context.Context, tty bool, operation, encoded strin
 	return m.Client.sshCommand(ctx, args...)
 }
 
+// MoshCommand starts the managed agent through Mosh while reusing the private
+// SSH control master for authentication. SSH remains alive beside Mosh for
+// synchronization, cleanup, and debugger-broker forwarding.
+func (m *Master) MoshCommand(ctx context.Context, operation, encoded, port string) *exec.Cmd {
+	mosh := m.Client.Mosh
+	if mosh == "" {
+		mosh = "mosh"
+	}
+	ssh := m.Client.SSH
+	if ssh == "" {
+		ssh = "ssh"
+	}
+	sshCommand := shellQuote(ssh) + " -S " + shellQuote(m.ControlPath)
+	args := []string{"--predict=always", "--ssh=" + sshCommand}
+	if port != "" {
+		args = append(args, "--port="+port)
+	}
+	args = append(args, "--", m.Client.Destination, m.Client.AgentPath, operation)
+	if encoded != "" {
+		args = append(args, encoded)
+	}
+	cmd := exec.CommandContext(ctx, mosh, args...)
+	cmd.Env = SafeMoshEnvironment()
+	return cmd
+}
+
+func MoshAvailable(client Client, probe HostProbe) bool {
+	return LocalMoshAvailable(client) && probe.Tools["mosh-server"]
+}
+
+func LocalMoshAvailable(client Client) bool {
+	mosh := client.Mosh
+	if mosh == "" {
+		mosh = "mosh"
+	}
+	_, err := exec.LookPath(mosh)
+	return err == nil
+}
+
 func (m *Master) Run(ctx context.Context, operation string, request any) ([]byte, error) {
 	encoded, err := agent.EncodeRequest(request)
 	if err != nil {
@@ -471,6 +511,25 @@ func SafeSSHEnvironment() []string {
 		result = append(result, "TERM=xterm-256color")
 	}
 	return result
+}
+
+// SafeMoshEnvironment applies the SSH environment boundary and restores only
+// a UTF-8 locale, which the Mosh client requires to model terminal state.
+func SafeMoshEnvironment() []string {
+	result := SafeSSHEnvironment()
+	locale := ""
+	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		value := os.Getenv(key)
+		normalized := strings.ToLower(strings.ReplaceAll(value, "-", ""))
+		if strings.Contains(normalized, "utf8") {
+			locale = value
+			break
+		}
+	}
+	if locale == "" {
+		locale = "en_US.UTF-8"
+	}
+	return append(result, "LANG="+locale, "LC_CTYPE="+locale)
 }
 
 func remoteAgentCommand(path, operation, encoded string) string {

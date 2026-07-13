@@ -217,6 +217,14 @@ func (b *Broker) handle(p *peer) {
 	switch first.Type {
 	case "ping":
 		_ = p.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "pong", SessionID: b.Record.ID, Token: b.Record.Token})
+	case "barrier":
+		if b.BeforeOpen != nil {
+			if err := b.BeforeOpen(context.Background()); err != nil {
+				_ = p.send(errorMessage(first, fmt.Errorf("shell sync barrier: %w", err)))
+				return
+			}
+		}
+		_ = p.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "barrier-ok", SessionID: b.Record.ID, Token: b.Record.Token})
 	case "open":
 		b.handleWrapper(p, reader, first)
 	case "pane-started":

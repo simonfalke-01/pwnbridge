@@ -27,7 +27,7 @@ $ pwnbridge
 - The Mac is the human-facing workspace, but neither synchronized endpoint silently wins a conflict.
 - Synchronization correctness comes from execution barriers, not optimistic timing.
 - Never trade convenience for silent data loss.
-- Use mature system primitives—OpenSSH and Mutagen—behind narrow internal interfaces.
+- Use mature system primitives—OpenSSH, Mosh, and Mutagen—behind narrow internal interfaces.
 - No publicly listening custom daemon.
 - No mandatory remote tmux, local Zellij, container, editor integration, or modified exploit template.
 - Zellij is first-class, because it is the primary host multiplexer, but terminal integration remains open and provider-based.
@@ -62,7 +62,8 @@ $ pwnbridge
 |---|---|---|
 | Language | Go | Fast startup, simple concurrency and Unix integration, straightforward Darwin ARM64/Linux AMD64 builds |
 | File synchronization | External Mutagen 0.18.1 | Bidirectional three-way sync, executable propagation, explicit flush, inspectable conflict state |
-| Transport | System OpenSSH | Preserves user SSH behavior and avoids reimplementing security-sensitive configuration |
+| Control transport | System OpenSSH | Preserves user SSH behavior and avoids reimplementing security-sensitive configuration |
+| Interactive transport | Mosh with SSH fallback | Predictive local echo while SSH retains synchronization, authentication, and control channels |
 | Local terminal proxy | Go PTY proxy | Raw byte fidelity, resize/signal handling, and prompt-marker parsing |
 | Remote execution | Small `pwnbridge-agent` | Structured execution, environment fidelity, runtime selection, and debugger lifecycle |
 | Configuration | Strict TOML | Portable and readable without a large ambiguous configuration framework |
@@ -125,9 +126,11 @@ pwnbridge doctor [--json]
 pwnbridge stop
 pwnbridge clean [--remote] [--yes]
 
-pwnbridge host add NAME DESTINATION
+pwnbridge host add NAME DESTINATION [--shell-transport=auto|mosh|ssh]
+                                     [--mosh-port=PORT[:PORT]]
 pwnbridge host list
 pwnbridge host show NAME [--json]
+pwnbridge host transport NAME auto|mosh|ssh [--mosh-port=PORT[:PORT]]
 pwnbridge host default NAME
 pwnbridge host use NAME
 pwnbridge host use --default
@@ -161,6 +164,8 @@ pwnbridge version [--json]
 Behavioral rules:
 
 - Bare `pwnbridge` means `pwnbridge shell`.
+- Host-scope interactive shells prefer Mosh with prediction in `auto` mode;
+  one-shot and control operations always use SSH.
 - `host default NAME` changes the machine fallback; `host use NAME` changes only the current project, and `host use --default` clears that project override.
 - In `host list`, `*` marks the machine default and `>` marks the current project's effective host.
 - The nearest ancestor `.pwnbridge.toml` defines the project; otherwise the current directory is the project root.
@@ -210,6 +215,8 @@ destination = "pwnbox"
 platform = "linux/amd64"
 workspace_root = "~/.local/share/pwnbridge/workspaces"
 bootstrap_profile = "pwn"
+shell_transport = "auto"
+mosh_port = "60000:61000"
 
 [sync]
 engine = "mutagen"
@@ -343,7 +350,7 @@ pwnbridge CLI ───── OpenSSH control master ───── pwnbridge-a
         │                                             ├─ host process
         │                                             └─ container process
         │
-        ├─ PTY proxy ◄──────────────────────────── remote Bash/process
+        ├─ PTY proxy ◄──── Mosh or SSH PTY ───── remote Bash/process
         │
         └─ terminal broker ◄── reverse SSH socket ─ pwntools-terminal
                   │
@@ -488,7 +495,9 @@ ssh -M -N
 - Wait with `ssh -O check`, not sleeps.
 - Publish the atomic active-session record only after the control master and
   reverse-broker ping are usable; it is a readiness boundary for `stop`.
-- Main shells and panes use `ssh -S ... -tt -e none` channels.
+- Auto host-scope shells use Mosh `--predict=always` when its UDP path,
+  `mosh-server`, and the authenticated barrier bridge are ready.
+- SSH shells and panes use `ssh -S ... -tt -e none` channels.
 - Keep the master until the final shell, run, or pane lease exits.
 - Cancel forwards and issue `ssh -O exit` on clean shutdown.
 - Restore the local terminal immediately if transport fails.
@@ -635,7 +644,7 @@ These are dependency-ordered parts of one complete target.
 
 ### D. Execution and shell
 
-- Implement structured agent protocol, `run`, SSH master, PTY proxy, terminal restoration, resize/signals, Bash markers, paste buffering, and direct-host runtime.
+- Implement structured agent protocol, `run`, SSH master, predictive Mosh shell, PTY proxy, terminal restoration, resize/signals, Bash markers/barrier hooks, paste buffering, and direct-host runtime.
 
 ### E. Terminal broker
 
@@ -701,7 +710,7 @@ These are dependency-ordered parts of one complete target.
 
 - pwnbridge uses the MIT license.
 - Mutagen is a separately licensed external runtime and is never vendored, linked, or redistributed.
-- Homebrew depends on `mutagen-io/mutagen/mutagen`.
+- Homebrew depends on `mutagen-io/mutagen/mutagen` and `mosh`.
 - Releases contain Darwin ARM64/AMD64 clients, Linux AMD64 agent, completions, README, license, checksums, and SBOM.
 - Product SemVer is independent from config, agent, broker, terminal-provider, and bootstrap protocol integers.
 - Client and agent release together; content-addressed older agents are retained for rollback.
@@ -728,6 +737,7 @@ These are dependency-ordered parts of one complete target.
 - [OpenSSH client](https://man.openbsd.org/ssh)
 - [OpenSSH configuration](https://man.openbsd.org/ssh_config)
 - [OpenSSH server forwarding](https://www.man7.org/linux/man-pages/man5/sshd_config.5.html)
+- [Mosh](https://mosh.org/)
 - [PTY semantics](https://www.man7.org/linux/man-pages/man7/pty.7.html)
 - [Zellij CLI recipes](https://zellij.dev/documentation/cli-recipes.html)
 - [Zellij programmatic control](https://zellij.dev/documentation/programmatic-control.html)
@@ -752,7 +762,8 @@ These are dependency-ordered parts of one complete target.
 - Project, directory, executable, and prefix are `pwnbridge`.
 - MIT license and Go implementation.
 - Mutagen 0.18.1 is external and version-gated.
-- System OpenSSH is the transport.
+- System OpenSSH is the control transport; host-scope interactive shells prefer
+  Mosh with SSH fallback.
 - Ubuntu/Debian amd64 is the remote platform.
 - Direct host execution is default; Docker/Podman is configurable.
 - Bash is the deterministic managed shell; one-shot execution is shell-independent.
@@ -777,7 +788,7 @@ agent, broker, and runtime paths used by the CLI were exercised.
 |---|---|
 | Go implementation | `go test ./...`, `go vet ./...`, cross-builds, and `go test -race ./...` pass on the supported Go 1.25.12 and 1.26.5 lines; native fuzz targets cover strict TOML, framed protocol, shell markers, Mutagen health JSON, ignore parsing, and workspace slugs |
 | Synchronization | Real two-way-safe initial sync, save-before-run barriers, executable bits, portable symlinks, Unicode, remote deletion, endpoint permission failure/recovery, conflicts (including spaces), explicit resolution backups, and remote-root deletion protection pass |
-| PTY lifecycle | Readline, bracketed paste, Ctrl-C/Z/D, job control, alternate-screen bytes, resize, prompt barriers, disconnect restoration, reconnect, and artifact return pass in real PTYs |
+| PTY lifecycle | SSH readline, bracketed paste, Ctrl-C/Z/D, job control, alternate-screen bytes, resize, prompt barriers, disconnect restoration, reconnect, and artifact return pass in real PTYs; Mosh coverage validates predictive transport selection and remote barrier generation |
 | Pwntools/GDB | pwntools 4.15.0 and pinned 5-dev commit `6571ec7de50d3c8fc235fad2a27bcdb07ca87acf` exercise `gdb.debug()`, process attach, `api=True`, and concurrent debuggers; Pwndbg 2026.02.18 and GDB TUI/resize pass |
 | Terminal integration | Zellij 0.44.3 and tmux 3.6a host panes pass; custom-provider PTYs and explicit remote tmux pass; remote tmux remains correct in the presence of a stale unrelated tmux server because each managed session has a private server/socket |
 | Runtime coverage | Direct Ubuntu amd64 and Podman container execution pass; solve process, gdbserver, GDB, wrapper, and API bridge remain in the intended runtime namespace |

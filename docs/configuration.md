@@ -43,6 +43,8 @@ destination = "pwnbox"
 platform = "linux/amd64"
 workspace_root = "~/.local/share/pwnbridge/workspaces"
 bootstrap_profile = "pwn"
+shell_transport = "auto"
+mosh_port = "60000:61000"
 
 [sync]
 engine = "mutagen"
@@ -93,9 +95,11 @@ hyphens; SSH destination aliases may be more descriptive.
 Use these commands rather than hand-editing host records:
 
 ```console
-pwnbridge host add NAME DESTINATION
+pwnbridge host add NAME DESTINATION [--shell-transport auto|mosh|ssh]
+                                     [--mosh-port PORT[:PORT]]
 pwnbridge host list
 pwnbridge host show NAME
+pwnbridge host transport NAME auto|mosh|ssh [--mosh-port PORT[:PORT]]
 pwnbridge host default NAME
 pwnbridge host use NAME
 pwnbridge host use --default
@@ -120,6 +124,15 @@ global default_host
 `workspace_root` accepts a safe path below the remote home (the portable
 default) or an absolute server-local path such as `/srv/pwnbridge/workspaces`.
 Pwnbridge always appends its installation and workspace identity beneath it.
+
+`shell_transport` is host-local network policy: `auto` prefers predictive Mosh
+and falls back to SSH, `mosh` requires it, and `ssh` disables it. `mosh_port`
+is one UDP port or an inclusive ascending range passed to Mosh. The default is
+`60000:61000`; open the same range on the remote firewall/security group.
+Mosh is used only for the interactive PTY. Authentication, file barriers,
+debugger control, one-shot commands, and cleanup remain on OpenSSH. Explicit
+`terminal.scope = "remote"` uses SSH because its nested multiplexer control is
+not compatible with the Mosh path.
 
 ### Synchronization
 
@@ -254,7 +267,10 @@ Pwnbridge values are not restored into debugger panes. Relevant `PATH`,
 
 Managed interactive shell currently requires Bash. With `source_user_rc =
 true`, the generated private rcfile sources `~/.bashrc` before installing its
-marker hooks. Pwnbridge does not edit `.bashrc`.
+hooks. Pwnbridge does not edit `.bashrc`. SSH shells use authenticated prompt
+markers in the local PTY proxy. Mosh shells use a private remote Bash DEBUG and
+prompt hook that calls the authenticated synchronization broker before and
+after each command; a failed pre-command barrier skips execution.
 
 One-shot `pwnbridge run` does not depend on the user's login shell. User argv is
 sent structurally. To intentionally request shell parsing, make it explicit:

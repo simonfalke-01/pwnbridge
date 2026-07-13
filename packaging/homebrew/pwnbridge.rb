@@ -16,6 +16,7 @@ class Pwnbridge < Formula
     sha256 "8868c4c57933762eb8dd9fa8a41e41ad5fe0431eea822b19369323832974f49c"
   end
 
+  depends_on "mosh"
   depends_on "mutagen-io/mutagen/mutagen"
 
   def install

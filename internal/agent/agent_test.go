@@ -36,7 +36,7 @@ func TestRequestRejectsTrailingJSON(t *testing.T) {
 
 func TestManagedBashRCHasConciseSafePrompt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bashrc")
-	if err := writeBashRC(path, "0123456789abcdef", "lima-x86", "ret2win", true); err != nil {
+	if err := writeBashRC(path, "0123456789abcdef", "lima-x86", "ret2win", true, false); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -49,8 +49,28 @@ func TestManagedBashRCHasConciseSafePrompt(t *testing.T) {
 			t.Fatalf("generated bashrc is missing %q:\n%s", wanted, content)
 		}
 	}
-	if err := writeBashRC(path, "0123456789abcdef", "bad;host", "ret2win", false); err == nil {
+	if err := writeBashRC(path, "0123456789abcdef", "bad;host", "ret2win", false, false); err == nil {
 		t.Fatal("unsafe prompt component was accepted")
+	}
+}
+
+func TestMoshBashRCUsesRemoteSynchronizationBarrier(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bashrc")
+	if err := writeBashRC(path, "0123456789abcdef", "remote-x86", "ret2win", false, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, wanted := range []string{"shopt -s extdebug", "pwnbridge-shell-barrier", "trap '__pwnbridge_before_command' DEBUG", "post-command sync blocked"} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("generated Mosh bashrc is missing %q:\n%s", wanted, content)
+		}
+	}
+	if strings.Contains(content, "777;pwnbridge") {
+		t.Fatal("Mosh bashrc retained the SSH-only OSC marker")
 	}
 }
 

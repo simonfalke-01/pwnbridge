@@ -12,7 +12,7 @@ local challenge ─── Mutagen two-way-safe ─────► remote workspa
         │                                             │
 pwnbridge ───────── dedicated OpenSSH master ───► static agent
         │                                             ├─ host process
-        ├─ PTY proxy ◄────────────────────────────────┤
+        ├─ PTY proxy ◄──── Mosh or SSH PTY ───────────┤
         │                                             └─ container process
         │
         └─ terminal broker ◄── reverse SSH socket ── pwntools-terminal
@@ -39,7 +39,7 @@ The client owns:
 The remote static agent owns only per-invocation work:
 
 - structured process execution;
-- PTY Bash startup and authenticated prompt markers;
+- PTY Bash startup, SSH prompt markers, and Mosh barrier hooks;
 - runtime/container creation and command entry;
 - the `pwntools-terminal` wrapper and request manifests;
 - debugger-pane execution after a Mac-approved request.
@@ -75,7 +75,7 @@ lock serializes barriers and identity initialization.
 Remote paths are similarly scoped below the user's home:
 
 ```text
-~/.local/share/pwnbridge/agents/1/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/2/<sha256>/pwnbridge-agent
 ~/.local/share/pwnbridge/workspaces/<machine-id>/<slug-hash>/
 ~/.cache/pwnbridge/sessions/<session-id>/
 ```
@@ -107,6 +107,25 @@ This gives two important guarantees:
 
 One-shot `run` performs the same pre/post barriers without prompt markers.
 
+## Mosh terminal and OpenSSH control plane
+
+Interactive host-scope shells default to `shell_transport = "auto"`. When the
+local `mosh` client, remote `mosh-server`, and authenticated reverse bridge are
+available, Pwnbridge launches Mosh with `--predict=always` and the host's UDP
+port/range. This gives local predictive echo while retaining a real remote PTY.
+Mosh reuses the private SSH control socket for its initial authentication.
+
+Mosh does not carry arbitrary SSH channels or Pwnbridge's OSC prompt marker.
+The generated Mosh Bash rcfile therefore performs pre-command and post-command
+barriers through a private agent hardlink and authenticated broker message. A
+failed pre-command DEBUG trap returns nonzero under Bash `extdebug`, so Bash
+skips the pending command. The broker address, 256-bit token, and session ID
+remain private per-session state. SSH is selected when auto prerequisites are
+missing; explicit `shell_transport = "mosh"` fails closed.
+
+`pwnbridge run`, synchronization, agent deployment, cleanup, debugger control,
+and all noninteractive operations always use OpenSSH.
+
 ## OpenSSH transport
 
 Pwnbridge launches a private control master with agent/X11 forwarding disabled,
@@ -131,8 +150,10 @@ available, that TCP endpoint is re-exposed as the same private Unix socket so a
 bridge-network container can still reach it. All fallbacks require an
 end-to-end authenticated ping before a host-pane debugger is enabled. If both
 forwarding forms are unavailable, Pwnbridge keeps the control master and normal
-shell/run channels, omits broker credentials, and reports that host-pane GDB is
-unavailable. Remote tmux/Zellij scope needs no broker forward.
+SSH shell/run channels, omits broker credentials, and reports that host-pane
+GDB is unavailable. Auto transport also falls back to SSH because a Mosh shell
+could not authenticate its synchronization barriers. Remote tmux/Zellij scope
+needs no broker forward and uses SSH for its managed shell.
 
 ## Agent protocol and process execution
 
@@ -150,7 +171,8 @@ live process executables are retained.
 
 ## PTY behavior
 
-Interactive channels use a local PTY proxy and remote `ssh -tt -e none`:
+Interactive channels use a local PTY proxy around Mosh or remote
+`ssh -tt -e none`:
 
 - local raw mode is restored on every exit path;
 - `SIGWINCH` propagates rows and columns;

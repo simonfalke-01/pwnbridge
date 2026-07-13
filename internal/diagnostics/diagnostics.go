@@ -18,7 +18,7 @@ type Check struct {
 	Remediation string `json:"remediation,omitempty"`
 }
 
-func Local(ctx context.Context, mutagen syncer.Mutagen) []Check {
+func Local(ctx context.Context, mutagen syncer.Mutagen, shellTransport string) []Check {
 	checks := []Check{{Name: "platform", OK: runtime.GOOS == "darwin" && (runtime.GOARCH == "arm64" || runtime.GOARCH == "amd64"), Detail: runtime.GOOS + "/" + runtime.GOARCH}}
 	for _, binary := range []string{"ssh", "scp"} {
 		path, err := exec.LookPath(binary)
@@ -26,6 +26,17 @@ func Local(ctx context.Context, mutagen syncer.Mutagen) []Check {
 		if err != nil {
 			check.Detail = err.Error()
 			check.Remediation = "install OpenSSH client tools"
+		}
+		checks = append(checks, check)
+	}
+	if shellTransport != "ssh" {
+		path, moshErr := exec.LookPath("mosh")
+		check := Check{Name: "mosh", OK: moshErr == nil, Detail: path, Remediation: "brew install mosh"}
+		if moshErr != nil {
+			check.Detail = moshErr.Error()
+			if shellTransport == "" || shellTransport == "auto" {
+				check.OK, check.Detail, check.Remediation = true, "unavailable; auto transport will use SSH", ""
+			}
 		}
 		checks = append(checks, check)
 	}
@@ -38,7 +49,7 @@ func Local(ctx context.Context, mutagen syncer.Mutagen) []Check {
 	return append(checks, check)
 }
 
-func Remote(ctx context.Context, client transport.Client, containerEngine string, requireForwarding bool) []Check {
+func Remote(ctx context.Context, client transport.Client, containerEngine string, requireForwarding bool, shellTransport string) []Check {
 	probe, err := client.BasicProbe(ctx)
 	if err != nil {
 		return []Check{{Name: "ssh", OK: false, Detail: err.Error(), Remediation: "verify destination, key authentication, and host key"}}
@@ -70,6 +81,14 @@ func Remote(ctx context.Context, client transport.Client, containerEngine string
 			for _, required := range []string{"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch", "patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc"} {
 				ok := agentProbe.Tools[required]
 				checks = append(checks, Check{Name: "remote-" + required, OK: ok, Detail: fmt.Sprintf("available=%t", ok), Remediation: "run pwnbridge host bootstrap"})
+			}
+			if shellTransport != "ssh" {
+				ok := agentProbe.Tools["mosh-server"]
+				check := Check{Name: "remote-mosh-server", OK: ok, Detail: fmt.Sprintf("available=%t", ok), Remediation: "run pwnbridge host bootstrap"}
+				if !ok && (shellTransport == "" || shellTransport == "auto") {
+					check.OK, check.Detail, check.Remediation = true, "unavailable; auto transport will use SSH", ""
+				}
+				checks = append(checks, check)
 			}
 			if containerEngine != "" {
 				ok := agentProbe.Tools[containerEngine]

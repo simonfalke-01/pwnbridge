@@ -23,6 +23,8 @@ type Host struct {
 	Platform         string `toml:"platform" json:"platform"`
 	WorkspaceRoot    string `toml:"workspace_root" json:"workspace_root"`
 	BootstrapProfile string `toml:"bootstrap_profile" json:"bootstrap_profile"`
+	ShellTransport   string `toml:"shell_transport,omitempty" json:"shell_transport"`
+	MoshPort         string `toml:"mosh_port,omitempty" json:"mosh_port"`
 }
 
 type Sync struct {
@@ -611,12 +613,34 @@ func (e Effective) Validate() error {
 		if host.BootstrapProfile != "" && host.BootstrapProfile != "pwn" {
 			problems = append(problems, fmt.Sprintf("hosts.%s.bootstrap_profile must be pwn", name))
 		}
+		if host.ShellTransport != "" && !oneOf(host.ShellTransport, "auto", "ssh", "mosh") {
+			problems = append(problems, fmt.Sprintf("hosts.%s.shell_transport must be auto, ssh, or mosh", name))
+		}
+		if host.MoshPort != "" && !validMoshPort(host.MoshPort) {
+			problems = append(problems, fmt.Sprintf("hosts.%s.mosh_port must be a UDP port or ascending range", name))
+		}
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+func validMoshPort(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) < 1 || len(parts) > 2 {
+		return false
+	}
+	ports := make([]int, len(parts))
+	for index, part := range parts {
+		port, err := strconv.Atoi(part)
+		if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != part {
+			return false
+		}
+		ports[index] = port
+	}
+	return len(ports) == 1 || ports[0] <= ports[1]
 }
 
 // ValidHostName reports whether name is safe to use as a stable configuration

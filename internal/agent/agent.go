@@ -29,8 +29,11 @@ import (
 )
 
 func Main(args []string) error {
-	if filepath.Base(os.Args[0]) == "pwntools-terminal" {
+	switch filepath.Base(os.Args[0]) {
+	case "pwntools-terminal":
 		return terminalWrapper(args)
+	case "pwnbridge-shell-barrier":
+		return shellBarrier(args)
 	}
 	if len(args) == 0 {
 		return errors.New("agent command is required")
@@ -108,7 +111,7 @@ func probe() error {
 	for _, tool := range []string{
 		"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch",
 		"patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc",
-		"docker", "podman", "zellij",
+		"docker", "podman", "zellij", "mosh-server",
 	} {
 		_, err := exec.LookPath(tool)
 		tools[tool] = err == nil
@@ -260,8 +263,13 @@ func shellCommand(args []string) error {
 	if err := installWrapper(filepath.Join(sessionDir, "bin", "pwntools-terminal")); err != nil {
 		return err
 	}
+	if request.RemoteBarrier {
+		if err := installWrapper(filepath.Join(sessionDir, "bin", "pwnbridge-shell-barrier")); err != nil {
+			return err
+		}
+	}
 	rcPath := filepath.Join(sessionDir, "bashrc")
-	if err := writeBashRC(rcPath, request.Nonce, request.PromptHost, request.PromptPath, request.SourceUserRC); err != nil {
+	if err := writeBashRC(rcPath, request.Nonce, request.PromptHost, request.PromptPath, request.SourceUserRC, request.RemoteBarrier); err != nil {
 		return err
 	}
 	request.Runtime.Workspace = request.Cwd
@@ -594,7 +602,7 @@ func replaceProcess(cmd *exec.Cmd) error {
 	return syscall.Exec(path, cmd.Args, cmd.Env)
 }
 
-func writeBashRC(path, nonce, promptHost, promptPath string, sourceUser bool) error {
+func writeBashRC(path, nonce, promptHost, promptPath string, sourceUser, remoteBarrier bool) error {
 	if !validID(nonce) {
 		return errors.New("invalid shell marker nonce")
 	}
@@ -605,7 +613,38 @@ func writeBashRC(path, nonce, promptHost, promptPath string, sourceUser bool) er
 	if sourceUser {
 		source = "if [ -r \"$HOME/.bashrc\" ]; then . \"$HOME/.bashrc\"; fi\n"
 	}
-	content := source + `
+	var hooks string
+	if remoteBarrier {
+		hooks = `
+shopt -s extdebug
+__pwnbridge_before_command() {
+    trap - DEBUG
+    if ! pwnbridge-shell-barrier; then
+        printf '\r\npwnbridge: pre-command sync blocked\r\n' >&2
+        return 1
+    fi
+}
+__pwnbridge_after_command() {
+    local __pwnbridge_status=$?
+    if ! pwnbridge-shell-barrier; then
+        printf '\r\npwnbridge: post-command sync blocked\r\n' >&2
+    fi
+    trap '__pwnbridge_before_command' DEBUG
+    return "$__pwnbridge_status"
+}
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+    "declare -a "*) PROMPT_COMMAND+=("__pwnbridge_after_command") ;;
+    *)
+        if [ -n "${PROMPT_COMMAND-}" ]; then
+            PROMPT_COMMAND=("${PROMPT_COMMAND}" "__pwnbridge_after_command")
+        else
+            PROMPT_COMMAND=("__pwnbridge_after_command")
+        fi
+        ;;
+esac
+`
+	} else {
+		hooks = `
 __pwnbridge_nonce='` + nonce + `'
 __pwnbridge_prompt_marker() {
     local __pwnbridge_status=$?
@@ -617,9 +656,52 @@ if [ -n "${PROMPT_COMMAND-}" ]; then
 else
     PROMPT_COMMAND="__pwnbridge_prompt_marker"
 fi
+`
+	}
+	content := source + hooks + `
 PS1=` + shellSingleQuote(`\[\e[1;32m\][pwnbridge:`+promptHost+`]\[\e[0m\] \[\e[1;34m\]`+promptPath+`\[\e[0m\] \$ `) + `
 `
 	return fsutil.AtomicWrite(path, []byte(content), 0o600)
+}
+
+func shellBarrier(args []string) error {
+	if len(args) != 0 {
+		return errors.New("pwnbridge-shell-barrier takes no arguments")
+	}
+	config, err := loadTerminalConfig()
+	if err != nil {
+		return err
+	}
+	terminal := config.Terminal
+	if terminal.Broker == "" || terminal.Token == "" {
+		return errors.New("managed shell has no synchronization broker")
+	}
+	conn, err := dialBroker(terminal.Broker)
+	if err != nil {
+		return fmt.Errorf("connect to synchronization broker: %w", err)
+	}
+	defer conn.Close()
+	request := protocol.Message{Protocol: version.ProtocolVersion, Type: "barrier", SessionID: terminal.SessionID, Token: terminal.Token}
+	if err := protocol.Encode(conn, request); err != nil {
+		return err
+	}
+	var response protocol.Message
+	if err := protocol.Decode(conn, &response); err != nil {
+		return err
+	}
+	if response.Protocol != version.ProtocolVersion || response.SessionID != terminal.SessionID || response.Token != terminal.Token {
+		return errors.New("synchronization broker response identity mismatch")
+	}
+	if response.Type == "barrier-ok" {
+		return nil
+	}
+	if response.Type == "error" {
+		payload, _ := protocol.ParsePayload[protocol.ExitPayload](response)
+		if payload.Error != "" {
+			return errors.New(payload.Error)
+		}
+	}
+	return fmt.Errorf("unexpected synchronization broker response %q", response.Type)
 }
 
 func validPromptComponent(value string) bool {

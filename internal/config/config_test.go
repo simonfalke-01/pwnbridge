@@ -139,6 +139,12 @@ func TestRejectsUnsafeExecutionConfiguration(t *testing.T) {
 		{"unknown bootstrap profile", func(e *Effective) {
 			e.Global.Hosts["x"] = Host{Destination: "pwnbox", Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "mystery"}
 		}},
+		{"unknown shell transport", func(e *Effective) {
+			e.Global.Hosts["x"] = Host{Destination: "pwnbox", Platform: "linux/amd64", ShellTransport: "telnet"}
+		}},
+		{"unsafe Mosh port", func(e *Effective) {
+			e.Global.Hosts["x"] = Host{Destination: "pwnbox", Platform: "linux/amd64", ShellTransport: "mosh", MoshPort: "60000;touch-pwned"}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,6 +212,19 @@ func TestRemoteWorkspaceRootAllowsSafeHomeAndAbsoluteRoots(t *testing.T) {
 	for _, root := range []string{"~/../escape", "relative/path", "/", "~/bad:port"} {
 		if validRemoteWorkspaceRoot(root) {
 			t.Fatalf("unsafe remote workspace root %q was accepted", root)
+		}
+	}
+}
+
+func TestMoshPortValidation(t *testing.T) {
+	for _, value := range []string{"60000", "60000:61000", "1", "65535"} {
+		if !validMoshPort(value) {
+			t.Errorf("valid Mosh port %q was rejected", value)
+		}
+	}
+	for _, value := range []string{"", "0", "65536", "61000:60000", "60000-61000", "060000", "1:2:3"} {
+		if validMoshPort(value) {
+			t.Errorf("invalid Mosh port %q was accepted", value)
 		}
 	}
 }

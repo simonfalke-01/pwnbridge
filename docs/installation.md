@@ -44,8 +44,8 @@ brew install simonfalke-01/pwnbridge/pwnbridge
 ```
 
 The formula installs the release Darwin client, the `pb` one-shot alias, its
-matching static Linux agent in formula `libexec`, and shell completions, and
-depends on the external Mutagen formula. It never vendors Mutagen.
+matching static Linux agent in formula `libexec`, and shell completions. It
+depends on the external Mutagen and Mosh formulas and never vendors either.
 
 ## Source build
 
@@ -83,10 +83,10 @@ export PWNBRIDGE_AGENT_PATH="$PWD/bin/pwnbridge-agent-linux-amd64"
 
 ## Mutagen
 
-Install Mutagen exactly 0.18.1:
+Install Mutagen exactly 0.18.1 and Mosh for a source build:
 
 ```console
-brew install mutagen-io/mutagen/mutagen
+brew install mutagen-io/mutagen/mutagen mosh
 test "$(mutagen version)" = 0.18.1
 ```
 
@@ -142,10 +142,11 @@ pwnbridge host bootstrap x86
 The host name is a small local identifier (ASCII letters, digits, `.`, `_`, and
 `-`); the destination remains your normal OpenSSH alias. Doctor verifies the
 remote platform, toolchain, disk/inodes, ptrace, pinned pwntools environment,
-reverse forwarding, and the configured container engine. Forwarding failure
-does not prevent ordinary shell/run or `terminal.scope = "remote"` operation.
+Mosh, reverse forwarding, and the configured container engine. Forwarding
+failure makes `shell_transport = "auto"` fall back to SSH and does not prevent
+ordinary shell/run or `terminal.scope = "remote"` operation.
 
-The profile installs standard build/debug packages, creates
+The profile installs `mosh-server` and standard build/debug packages, creates
 `~/.local/share/pwnbridge/envs/pwn-v1`, and enforces pwntools 4.15.0. The static
 agent is deployed even when `--no-sudo` is used. Optional Pwndbg is pinned and
 checksum verified:
@@ -155,6 +156,11 @@ pwnbridge host bootstrap x86 --with-pwndbg
 ```
 
 Bootstrap is safe to rerun after interruption or during upgrades.
+
+Mosh requires inbound UDP. Its default configured range is 60000–61000; allow
+that range in both the host firewall and cloud security group, or narrow
+`hosts.NAME.mosh_port` to a permitted port/range. SSH remains required because
+Mosh uses it for authentication and Pwnbridge uses it for its control plane.
 
 ## Verify installation
 

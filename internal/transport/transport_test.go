@@ -90,6 +90,34 @@ func TestManagedCommandQuietsNormalSharedConnectionClose(t *testing.T) {
 	}
 }
 
+func TestMoshCommandUsesPredictionControlMasterAndPortRange(t *testing.T) {
+	master := &Master{Client: Client{SSH: "ssh", Mosh: "mosh", Destination: "user@host", AgentPath: "/agent"}, ControlPath: "/private/control"}
+	command := master.MoshCommand(context.Background(), "shell", "request", "61000:61010")
+	want := []string{"mosh", "--predict=always", "--ssh='ssh' -S '/private/control'", "--port=61000:61010", "--", "user@host", "/agent", "shell", "request"}
+	if strings.Join(command.Args, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("Mosh argv = %#v, want %#v", command.Args, want)
+	}
+}
+
+func TestSafeMoshEnvironmentKeepsOnlyUTF8Locale(t *testing.T) {
+	t.Setenv("LANG", "en_SG.UTF-8")
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LC_CTYPE", "C")
+	values := map[string]string{}
+	for _, entry := range SafeMoshEnvironment() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if values["LANG"] != "en_SG.UTF-8" || values["LC_CTYPE"] != "en_SG.UTF-8" {
+		t.Fatalf("Mosh locale = %#v", values)
+	}
+	if _, exists := values["LC_ALL"]; exists {
+		t.Fatalf("non-UTF-8 LC_ALL leaked into Mosh environment: %#v", values)
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	if got := shellQuote("a'b"); got != `'a'\''b'` {
 		t.Fatalf("got %q", got)

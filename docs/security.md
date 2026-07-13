@@ -107,6 +107,22 @@ data directory. Deployment:
 No sudo or system path is used for the agent. Client/agent protocol mismatch is
 an explicit error.
 
+## Mosh boundary
+
+Mosh is optional terminal transport, not a replacement for the OpenSSH control
+plane. It authenticates through the existing private SSH master, binds a remote
+UDP port from the configured range, and encrypts terminal traffic with its
+one-time session key. Operators must expose only the chosen UDP range; no
+Pwnbridge TCP service listens publicly.
+
+Mosh shells cannot use the local OSC marker parser. Their generated Bash hook
+invokes a private hardlink of the deployed agent, which loads mode-private
+session state and sends an authenticated `barrier` request over the reverse SSH
+bridge. The broker validates protocol, session ID, and the random 256-bit token
+before touching synchronization. If that bridge is missing, auto transport
+uses SSH and forced Mosh fails closed. Environment filtering prevents broker
+credentials from being inherited from the local machine.
+
 ## Process and environment handling
 
 Public `run` argv, pwntools debugger argv, and provider commands are represented

@@ -35,16 +35,17 @@ type ExecRequest struct {
 }
 
 type ShellRequest struct {
-	Cwd          string            `json:"cwd"`
-	Shell        string            `json:"shell"`
-	SourceUserRC bool              `json:"source_user_rc"`
-	Nonce        string            `json:"nonce"`
-	SessionID    string            `json:"session_id"`
-	PromptHost   string            `json:"prompt_host,omitempty"`
-	PromptPath   string            `json:"prompt_path,omitempty"`
-	Environment  map[string]string `json:"environment,omitempty"`
-	Terminal     TerminalSpec      `json:"terminal"`
-	Runtime      RuntimeSpec       `json:"runtime"`
+	Cwd           string            `json:"cwd"`
+	Shell         string            `json:"shell"`
+	SourceUserRC  bool              `json:"source_user_rc"`
+	Nonce         string            `json:"nonce"`
+	SessionID     string            `json:"session_id"`
+	PromptHost    string            `json:"prompt_host,omitempty"`
+	PromptPath    string            `json:"prompt_path,omitempty"`
+	Environment   map[string]string `json:"environment,omitempty"`
+	Terminal      TerminalSpec      `json:"terminal"`
+	Runtime       RuntimeSpec       `json:"runtime"`
+	RemoteBarrier bool              `json:"remote_barrier,omitempty"`
 }
 
 type TerminalSpec struct {

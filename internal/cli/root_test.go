@@ -16,6 +16,7 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 	"github.com/simonfalke-01/pwnbridge/internal/shell"
 	"github.com/simonfalke-01/pwnbridge/internal/syncer"
+	"github.com/simonfalke-01/pwnbridge/internal/transport"
 	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -26,6 +27,29 @@ func testApp(t *testing.T) (*App, *bytes.Buffer) {
 	p := paths.Paths{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state"), Data: filepath.Join(root, "data"), Cache: filepath.Join(root, "cache")}
 	output := &bytes.Buffer{}
 	return &App{Paths: p, In: os.Stdin, Out: output, Err: output}, output
+}
+
+func TestShellTransportAutoPrefersMoshAndForcedModeFailsClosed(t *testing.T) {
+	mosh := filepath.Join(t.TempDir(), "mosh")
+	if err := os.WriteFile(mosh, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session := &activeSession{
+		Broker: &broker.Broker{},
+		Record: broker.SessionRecord{RemoteSocket: "unix:/remote/broker.sock"},
+		Master: &transport.Master{Client: transport.Client{Mosh: mosh}},
+		Probe:  transport.HostProbe{Tools: map[string]bool{"mosh-server": true}},
+	}
+	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "mosh" {
+		t.Fatalf("auto transport = %q, %v", got, err)
+	}
+	session.Probe.Tools["mosh-server"] = false
+	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "ssh" {
+		t.Fatalf("auto fallback = %q, %v", got, err)
+	}
+	if _, err := shellTransport(config.Host{ShellTransport: "mosh"}, "host", session); err == nil || !strings.Contains(err.Error(), "mosh-server") {
+		t.Fatalf("forced Mosh did not fail closed: %v", err)
+	}
 }
 
 func execute(t *testing.T, app *App, args ...string) error {
@@ -128,6 +152,19 @@ func TestHostLifecycle(t *testing.T) {
 	}
 	if effective.Global.Hosts["x86"].Destination != "user@example" {
 		t.Fatalf("config: %#v", effective.Global)
+	}
+	if effective.Global.Hosts["x86"].ShellTransport != "auto" || effective.Global.Hosts["x86"].MoshPort != "60000:61000" {
+		t.Fatalf("host add did not install Mosh defaults: %#v", effective.Global.Hosts["x86"])
+	}
+	if err := execute(t, app, "host", "transport", "x86", "mosh", "--mosh-port", "61000:61010"); err != nil {
+		t.Fatal(err)
+	}
+	effective, err = config.Load(cwd, app.Paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.Global.Hosts["x86"].ShellTransport != "mosh" || effective.Global.Hosts["x86"].MoshPort != "61000:61010" {
+		t.Fatalf("host transport did not persist: %#v", effective.Global.Hosts["x86"])
 	}
 	output.Reset()
 	if err := execute(t, app, "host", "list"); err != nil {
@@ -270,7 +307,7 @@ func TestVersionJSON(t *testing.T) {
 	if err := execute(t, app, "version", "--json"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"protocol": 1`) {
+	if !strings.Contains(output.String(), `"protocol": 2`) {
 		t.Fatalf("output: %s", output)
 	}
 }

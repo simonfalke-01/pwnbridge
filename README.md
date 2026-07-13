@@ -21,8 +21,8 @@ shown, remote artifacts are synchronized back to the Mac.
 ## What it provides
 
 - A bidirectional, conflict-safe workspace powered by external Mutagen 0.18.1.
-- A real PTY over the user's system OpenSSH, including signals, job control,
-  readline, resize, and interactive programs.
+- A predictive Mosh PTY for instant local echo, with automatic SSH fallback,
+  signals, job control, readline, resize, and interactive programs.
 - Structural argv execution with ordinary remote exit statuses.
 - Transparent pwntools `gdb.debug()`, `gdb.attach()`, and `api=True` support.
 - First-class local Zellij and tmux panes, plus WezTerm, Kitty, iTerm2,
@@ -41,6 +41,7 @@ On the Mac:
 
 - macOS on ARM64 or AMD64
 - OpenSSH (`ssh` and `scp`)
+- Mosh client
 - Mutagen exactly 0.18.1
 - one supported terminal provider; Terminal.app is always the fallback
 
@@ -48,6 +49,8 @@ On the remote:
 
 - Ubuntu or Debian Linux amd64
 - an SSH account whose normal OpenSSH configuration already works
+- `mosh-server` and inbound UDP 60000–61000 (installed by bootstrap; optional
+  when `shell_transport = "ssh"`)
 - roughly 1 GiB free for bootstrap tools
 - optional rootless Podman or Docker for container runtime
 
@@ -57,8 +60,8 @@ to work. It never edits SSH, shell, or GDB dotfiles.
 
 ## Install
 
-Install the native Mac client, bundled Linux amd64 agent, Mutagen dependency,
-and shell completions in one command:
+Install the native Mac client, bundled Linux amd64 agent, Mutagen and Mosh
+dependencies, and shell completions in one command:
 
 ```console
 brew install simonfalke-01/pwnbridge/pwnbridge
@@ -82,10 +85,10 @@ For a source build, keep the Linux agent adjacent to the client, or set
 archives place it adjacent automatically. Homebrew installs it in formula
 `libexec`, where Pwnbridge finds it automatically.
 
-Source builds also require Mutagen 0.18.1:
+Source builds also require Mutagen 0.18.1 and Mosh:
 
 ```console
-brew install mutagen-io/mutagen/mutagen
+brew install mutagen-io/mutagen/mutagen mosh
 mutagen version
 ```
 
@@ -116,8 +119,17 @@ pwnbridge host bootstrap x86 --profile pwn
 `host bootstrap` prints its package plan before invoking sudo. It is
 idempotent, installs a user-owned pwntools 4.15 environment, supports
 `--dry-run`, and can validate an already-prepared host with `--no-sudo`.
-It also checks reverse forwarding; if the server forbids it, ordinary shell/run
-still work and remote tmux/Zellij scope remains available.
+It also installs `mosh-server` and checks reverse forwarding. Open UDP
+60000–61000 on the host firewall/security group for Mosh. If either Mosh or the
+authenticated sync bridge is unavailable, `shell_transport = "auto"` uses SSH;
+one-shot `run` always uses SSH.
+
+Force either behavior, or narrow the UDP range, without editing TOML:
+
+```console
+pwnbridge host transport x86 mosh --mosh-port 60000:60100
+pwnbridge host transport x86 ssh
+```
 
 ### What gets installed remotely
 
@@ -127,7 +139,7 @@ your existing SSH connection, verifies the hash on Ubuntu, and atomically
 caches it under:
 
 ```text
-~/.local/share/pwnbridge/agents/1/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/2/<sha256>/pwnbridge-agent
 ```
 
 `host bootstrap` separately installs the ordinary Ubuntu/Debian debugger and

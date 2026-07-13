@@ -6,7 +6,8 @@
 
 Open managed interactive Bash in the synchronized remote workspace. Bare
 `pwnbridge` is identical. Pre-command Enter and post-command prompt are guarded
-by synchronization barriers.
+by synchronization barriers. The host's `shell_transport` selects predictive
+Mosh or SSH; `auto` prefers Mosh when both ends and the sync bridge are ready.
 
 The installed `pb` executable is the concise one-shot interface. `pb COMMAND
 [ARG...]` is equivalent to `pwnbridge run -- COMMAND [ARG...]` with automatic
@@ -28,7 +29,7 @@ IDs. It does not create a workspace.
 
 ### `pwnbridge doctor [--json]`
 
-Check local platform/OpenSSH/Mutagen and, when a host is selected, deploy the
+Check local platform/OpenSSH/Mosh/Mutagen and, when a host is selected, deploy the
 diagnostic agent and check platform, distro, disk/inodes, writable home,
 ptrace, pwntools, and required tools.
 
@@ -51,9 +52,11 @@ directory. Existing files are never overwritten. Configuration is optional.
 ## Host commands
 
 ```text
-pwnbridge host add NAME DESTINATION
+pwnbridge host add NAME DESTINATION [--shell-transport auto|mosh|ssh]
+                                     [--mosh-port PORT[:PORT]]
 pwnbridge host list
 pwnbridge host show NAME [--json]
+pwnbridge host transport NAME auto|mosh|ssh [--mosh-port PORT[:PORT]]
 pwnbridge host default NAME
 pwnbridge host use NAME
 pwnbridge host use --default
@@ -76,6 +79,14 @@ skips apt and reports missing prerequisites; the only profile is `pwn`.
 Doctor/bootstrap probe reverse forwarding; unavailable forwarding is fatal to
 host-pane diagnostics but not to shell/run or explicit remote-multiplexer
 scope.
+
+`auto` is the default interactive transport. It uses Mosh with
+`--predict=always`, or SSH when the local client, remote `mosh-server`, reverse
+sync bridge, or compatible host terminal scope is unavailable. `mosh` makes
+those prerequisites mandatory; `ssh` disables Mosh. One-shot `run`, sync,
+cleanup, and broker control continue to use the private SSH master.
+`host transport` updates only the named machine-wide host record; it does not
+change the machine default or the current project's host binding.
 
 ## Synchronization commands
 

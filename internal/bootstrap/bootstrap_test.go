@@ -47,6 +47,9 @@ func TestPinnedPwntools(t *testing.T) {
 	if got := strings.Join(Plan(Options{}), "\n"); !strings.Contains(got, "pwntools==4.15.0") {
 		t.Fatal("pwntools must be pinned")
 	}
+	if !strings.Contains(strings.Join(Packages, " "), "mosh") {
+		t.Fatal("bootstrap must install mosh-server")
+	}
 }
 
 func TestPinnedPwndbgIsPortableAndDoesNotModifyDotfiles(t *testing.T) {

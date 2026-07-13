@@ -15,6 +15,7 @@ var Packages = []string{
 	"python3", "python3-dev", "python3-venv", "python3-pip", "libssl-dev", "libffi-dev", "tmux",
 	"python3-pwntools",
 	"strace", "ltrace", "socat", "netcat-openbsd", "libc6-dbg", "git", "curl", "ca-certificates", "xz-utils",
+	"mosh",
 }
 
 const (
@@ -71,7 +72,7 @@ printf 'preflight-ok:%s:%s:%s\n' "$ID" "$available" "$inodes"`
 		return fmt.Errorf("remote bootstrap preflight failed: %w: %s", preflightErr, strings.TrimSpace(string(output)))
 	}
 	if options.NoSudo {
-		tools := []string{"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch", "patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc"}
+		tools := []string{"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch", "patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc", "mosh-server"}
 		if options.WithPwndbg {
 			tools = append(tools, "curl", "sha256sum", "tar", "xz")
 		}

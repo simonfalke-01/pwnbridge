@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -53,6 +54,38 @@ func TestBrokerAuthenticationAndPing(t *testing.T) {
 		if response.Token != message.Token {
 			t.Fatalf("error response did not echo supplied credential: %#v", response)
 		}
+	}
+}
+
+func TestBrokerRunsAuthenticatedShellBarrier(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "pb-barrier-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(dir, "b.sock")}
+	b := New(record, provider.NewRegistry(t.TempDir()))
+	calls := 0
+	b.BeforeOpen = func(context.Context) error { calls++; return nil }
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	conn, err := net.Dial("unix", record.LocalSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := protocol.Message{Protocol: version.ProtocolVersion, Type: "barrier", SessionID: record.ID, Token: record.Token}
+	if err := protocol.Encode(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	var response protocol.Message
+	if err := protocol.Decode(conn, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Type != "barrier-ok" || calls != 1 {
+		t.Fatalf("barrier response=%#v calls=%d", response, calls)
 	}
 }
 
