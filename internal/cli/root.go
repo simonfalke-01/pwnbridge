@@ -605,15 +605,21 @@ func (a *App) run(ctx context.Context, args []string, ttyMode string) (result er
 	}
 	tty := ttyMode == "always" || ttyMode == "auto" && term.IsTerminal(int(a.In.Fd()))
 	remote := session.Master.Command(ctx, tty, "exec", encoded)
-	remote.Stdin, remote.Stdout, remote.Stderr = a.In, a.Out, a.Err
 	progress.Stop()
 	if tty && term.IsTerminal(int(a.In.Fd())) {
-		old, rawErr := term.MakeRaw(int(a.In.Fd()))
-		if rawErr != nil {
-			return rawErr
+		// Put SSH behind the same local PTY proxy as the managed shell. Merely
+		// attaching its stdio directly gives some SSH/OpenSSH combinations a
+		// stale or zero-sized remote PTY, which breaks carriage-return progress
+		// renderers such as pwninit/indicatif. The proxy copies the real window
+		// size before launch, forwards SIGWINCH, and restores terminal mode.
+		proxy := shell.Proxy{In: a.In, Out: a.Out, Err: a.Err, Nonce: session.Nonce}
+		if err := proxy.Run(ctx, remote); ctx.Err() != nil {
+			return ctx.Err()
+		} else {
+			return err
 		}
-		defer term.Restore(int(a.In.Fd()), old)
 	}
+	remote.Stdin, remote.Stdout, remote.Stderr = a.In, a.Out, a.Err
 	if err := remote.Run(); ctx.Err() != nil {
 		return ctx.Err()
 	} else {
