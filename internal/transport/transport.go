@@ -341,7 +341,10 @@ func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
 }
 
 func (m *Master) Command(ctx context.Context, tty bool, operation, encoded string) *exec.Cmd {
-	args := []string{"-S", m.ControlPath}
+	// OpenSSH otherwise prints "Shared connection to … closed." whenever a
+	// normal multiplexed PTY exits. The command's exit status still carries
+	// real transport and remote-process failures back to Pwnbridge.
+	args := []string{"-q", "-S", m.ControlPath}
 	if tty {
 		args = append(args, "-tt", "-e", "none")
 	} else {

@@ -95,4 +95,10 @@ expect {
 }
 expect -re {[$#] $}
 send -- "exit\r"
-expect eof
+expect {
+    -re {Shared connection to .* closed} {
+        puts stderr "normal managed-shell exit leaked OpenSSH close chatter"
+        exit 1
+    }
+    eof {}
+}

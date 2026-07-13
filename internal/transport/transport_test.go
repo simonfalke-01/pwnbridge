@@ -79,6 +79,17 @@ func TestRemoteAgentCommandQuotesRequest(t *testing.T) {
 	}
 }
 
+func TestManagedCommandQuietsNormalSharedConnectionClose(t *testing.T) {
+	master := &Master{
+		Client:      Client{SSH: "ssh", Destination: "host", AgentPath: "/agent"},
+		ControlPath: "/control",
+	}
+	command := master.Command(context.Background(), true, "exec", "request")
+	if len(command.Args) < 2 || command.Args[1] != "-q" {
+		t.Fatalf("managed SSH command is not quiet: %#v", command.Args)
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	if got := shellQuote("a'b"); got != `'a'\''b'` {
 		t.Fatalf("got %q", got)
