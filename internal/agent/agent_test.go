@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pwnbridge/pwnbridge/internal/fsutil"
-	"github.com/pwnbridge/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 )
 
 func TestRequestRoundTrip(t *testing.T) {

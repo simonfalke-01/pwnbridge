@@ -20,9 +20,9 @@ builds:
     mod_timestamp: '0'
     ldflags:
       - -s -w
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Version={{.Version}}
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Commit={{.Commit}}
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Date={{.CommitDate}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Version={{.Version}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Commit={{.Commit}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Date={{.CommitDate}}
   - id: pwnbridge-agent
     main: ./cmd/pwnbridge-agent
     binary: pwnbridge-agent-linux-amd64
@@ -33,9 +33,9 @@ builds:
     mod_timestamp: '0'
     ldflags:
       - -s -w
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Version={{.Version}}
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Commit={{.Commit}}
-      - -X github.com/pwnbridge/pwnbridge/internal/version.Date={{.CommitDate}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Version={{.Version}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Commit={{.Commit}}
+      - -X github.com/simonfalke-01/pwnbridge/internal/version.Date={{.CommitDate}}
 
 archives:
   - id: client

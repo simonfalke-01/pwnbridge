@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pwnbridge/pwnbridge/internal/agent"
-	"github.com/pwnbridge/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/agent"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
 type Client struct {

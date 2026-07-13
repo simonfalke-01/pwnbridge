@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pwnbridge/pwnbridge/internal/broker"
-	"github.com/pwnbridge/pwnbridge/internal/config"
-	"github.com/pwnbridge/pwnbridge/internal/paths"
-	"github.com/pwnbridge/pwnbridge/internal/protocol"
-	"github.com/pwnbridge/pwnbridge/internal/shell"
-	"github.com/pwnbridge/pwnbridge/internal/syncer"
-	"github.com/pwnbridge/pwnbridge/internal/workspace"
+	"github.com/simonfalke-01/pwnbridge/internal/broker"
+	"github.com/simonfalke-01/pwnbridge/internal/config"
+	"github.com/simonfalke-01/pwnbridge/internal/paths"
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/shell"
+	"github.com/simonfalke-01/pwnbridge/internal/syncer"
+	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 )
 
 func testApp(t *testing.T) (*App, *bytes.Buffer) {

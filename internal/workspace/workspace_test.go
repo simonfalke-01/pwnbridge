@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pwnbridge/pwnbridge/internal/paths"
+	"github.com/simonfalke-01/pwnbridge/internal/paths"
 )
 
 func TestStableWorkspaceIdentity(t *testing.T) {

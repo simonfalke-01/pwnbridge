@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pwnbridge/pwnbridge/internal/protocol"
-	"github.com/pwnbridge/pwnbridge/internal/terminal/provider"
-	"github.com/pwnbridge/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/terminal/provider"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
 func TestBrokerAuthenticationAndPing(t *testing.T) {

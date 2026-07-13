@@ -15,12 +15,12 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/pwnbridge/pwnbridge/internal/agent"
-	"github.com/pwnbridge/pwnbridge/internal/fsutil"
-	"github.com/pwnbridge/pwnbridge/internal/protocol"
-	"github.com/pwnbridge/pwnbridge/internal/terminal/provider"
-	"github.com/pwnbridge/pwnbridge/internal/transport"
-	"github.com/pwnbridge/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/agent"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/terminal/provider"
+	"github.com/simonfalke-01/pwnbridge/internal/transport"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
 const MaxPanes = 8

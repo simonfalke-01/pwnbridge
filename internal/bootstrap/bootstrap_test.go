@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pwnbridge/pwnbridge/internal/transport"
+	"github.com/simonfalke-01/pwnbridge/internal/transport"
 )
 
 func TestNoSudoPlan(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/pwnbridge/pwnbridge/internal/syncer"
-	"github.com/pwnbridge/pwnbridge/internal/transport"
+	"github.com/simonfalke-01/pwnbridge/internal/syncer"
+	"github.com/simonfalke-01/pwnbridge/internal/transport"
 )
 
 type Check struct {

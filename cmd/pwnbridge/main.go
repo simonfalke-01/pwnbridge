@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/pwnbridge/pwnbridge/internal/cli"
+	"github.com/simonfalke-01/pwnbridge/internal/cli"
 )
 
 func main() {

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/pwnbridge/pwnbridge/internal/paths"
+	"github.com/simonfalke-01/pwnbridge/internal/paths"
 )
 
 func testPaths(root string) paths.Paths {

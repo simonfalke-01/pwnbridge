@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pwnbridge/pwnbridge/internal/fsutil"
-	"github.com/pwnbridge/pwnbridge/internal/identity"
-	"github.com/pwnbridge/pwnbridge/internal/paths"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/identity"
+	"github.com/simonfalke-01/pwnbridge/internal/paths"
 	"golang.org/x/sys/unix"
 )
 

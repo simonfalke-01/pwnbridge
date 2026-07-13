@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pwnbridge/pwnbridge/internal/config"
-	"github.com/pwnbridge/pwnbridge/internal/version"
-	"github.com/pwnbridge/pwnbridge/internal/workspace"
+	"github.com/simonfalke-01/pwnbridge/internal/config"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 )
 
 var identifierPattern = regexp.MustCompile(`\bsync_[A-Za-z0-9]{32,}\b`)

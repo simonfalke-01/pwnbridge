@@ -4,9 +4,9 @@
 # Homebrew formula for the Darwin client and its Linux amd64 agent asset.
 class Pwnbridge < Formula
   desc "Make a remote Linux x86-64 pwn environment feel local on macOS"
-  homepage "https://github.com/pwnbridge/pwnbridge"
+  homepage "https://github.com/simonfalke-01/pwnbridge"
   license "MIT"
-  head "https://github.com/pwnbridge/pwnbridge.git", branch: "main"
+  head "https://github.com/simonfalke-01/pwnbridge.git", branch: "main"
 
   depends_on "go" => :build
   depends_on "mutagen-io/mutagen/mutagen"
@@ -14,7 +14,7 @@ class Pwnbridge < Formula
   def install
     ldflags = %W[
       -s -w
-      -X github.com/pwnbridge/pwnbridge/internal/version.Version=#{version}
+      -X github.com/simonfalke-01/pwnbridge/internal/version.Version=#{version}
     ]
     system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/pwnbridge"
     system({ "CGO_ENABLED" => "0", "GOOS" => "linux", "GOARCH" => "amd64" },

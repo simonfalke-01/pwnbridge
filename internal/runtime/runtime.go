@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pwnbridge/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 )
 
 type State struct {

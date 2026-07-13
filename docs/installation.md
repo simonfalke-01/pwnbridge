@@ -36,23 +36,22 @@ hash changes. Nothing is manually installed into `/usr/local/bin` on Ubuntu.
 
 ## Homebrew
 
-The repository contains a formula template at
-`packaging/homebrew/pwnbridge.rb`. A published tap can install with:
+Install from the published tap with:
 
 ```console
-brew install OWNER/tap/pwnbridge
+brew install simonfalke-01/pwnbridge/pwnbridge
 ```
 
-The formula builds the Darwin client and Linux agent, installs the agent in
-formula `libexec`, generates shell completions, and depends on the external
-Mutagen formula. It never vendors Mutagen.
+The formula installs the release Darwin client, its matching static
+Linux agent in formula `libexec`, and shell completions, and depends on the
+external Mutagen formula. It never vendors Mutagen.
 
 ## Source build
 
 Requirements are Go 1.25 or 1.26 and a C-free cross-build path:
 
 ```console
-git clone https://github.com/pwnbridge/pwnbridge.git
+git clone https://github.com/simonfalke-01/pwnbridge.git
 cd pwnbridge
 make verify
 make build

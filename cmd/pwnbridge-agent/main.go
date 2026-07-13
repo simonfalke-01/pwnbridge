@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/pwnbridge/pwnbridge/internal/agent"
+	"github.com/simonfalke-01/pwnbridge/internal/agent"
 )
 
 func main() {

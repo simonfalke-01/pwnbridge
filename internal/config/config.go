@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/pwnbridge/pwnbridge/internal/fsutil"
-	"github.com/pwnbridge/pwnbridge/internal/paths"
-	"github.com/pwnbridge/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/paths"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
 type Host struct {

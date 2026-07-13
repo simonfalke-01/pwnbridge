@@ -57,10 +57,17 @@ to work. It never edits SSH, shell, or GDB dotfiles.
 
 ## Install
 
-Until a release tap is published, build from source:
+Install the native Mac client, bundled Linux amd64 agent, Mutagen dependency,
+and shell completions in one command:
 
 ```console
-git clone https://github.com/pwnbridge/pwnbridge.git
+brew install simonfalke-01/pwnbridge/pwnbridge
+```
+
+Or build from source:
+
+```console
+git clone https://github.com/simonfalke-01/pwnbridge.git
 cd pwnbridge
 make build
 install -m 0755 bin/pwnbridge ~/.local/bin/pwnbridge
@@ -68,12 +75,12 @@ install -m 0755 bin/pwnbridge-agent-linux-amd64 \
   ~/.local/bin/pwnbridge-agent-linux-amd64
 ```
 
-Keep the Linux agent adjacent to the client, or set
+For a source build, keep the Linux agent adjacent to the client, or set
 `PWNBRIDGE_AGENT_PATH=/absolute/path/pwnbridge-agent-linux-amd64`. Release
-archives place it adjacent automatically. A Homebrew formula is provided in
-`packaging/homebrew/` and depends on `mutagen-io/mutagen/mutagen`.
+archives place it adjacent automatically. Homebrew installs it in formula
+`libexec`, where Pwnbridge finds it automatically.
 
-Install Mutagen 0.18.1 separately:
+Source builds also require Mutagen 0.18.1:
 
 ```console
 brew install mutagen-io/mutagen/mutagen
@@ -110,6 +117,25 @@ idempotent, installs a user-owned pwntools 4.15 environment, supports
 `--dry-run`, and can validate an already-prepared host with `--no-sudo`.
 It also checks reverse forwarding; if the server forbids it, ordinary shell/run
 still work and remote tmux/Zellij scope remains available.
+
+### What gets installed remotely
+
+There is no remote Pwnbridge service to install or keep running. On first use,
+the Mac client hashes its bundled static Linux amd64 agent, uploads it over
+your existing SSH connection, verifies the hash on Ubuntu, and atomically
+caches it under:
+
+```text
+~/.local/share/pwnbridge/agents/1/<sha256>/pwnbridge-agent
+```
+
+`host bootstrap` separately installs the ordinary Ubuntu/Debian debugger and
+build packages through `apt`, then creates the pinned pwntools environment at
+`~/.local/share/pwnbridge/envs/pwn-v1`. It may use `sudo` only for system
+packages; the agent, Python environment, workspaces, and session state remain
+owned by the SSH user. Bootstrap is idempotent, and future client upgrades
+deploy a new content-addressed agent automatically—no `scp`, remote login,
+system-wide Pwnbridge binary, or persistent daemon is required.
 
 No per-challenge config is required. From any challenge directory:
 

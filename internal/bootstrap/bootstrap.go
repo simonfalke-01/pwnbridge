@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/pwnbridge/pwnbridge/internal/transport"
+	"github.com/simonfalke-01/pwnbridge/internal/transport"
 )
 
 var Packages = []string{

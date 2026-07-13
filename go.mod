@@ -1,4 +1,4 @@
-module github.com/pwnbridge/pwnbridge
+module github.com/simonfalke-01/pwnbridge
 
 go 1.25.0
 

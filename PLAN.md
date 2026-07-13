@@ -102,7 +102,7 @@ Continuous watching is a latency optimization. Flush plus complete health valida
 ### 5.1 First-time setup
 
 ```console
-brew install <owner>/tap/pwnbridge
+brew install simonfalke-01/pwnbridge/pwnbridge
 pwnbridge host add x86 pwnbox
 pwnbridge host doctor x86
 pwnbridge host bootstrap x86 --profile pwn
@@ -263,7 +263,7 @@ kind = "container"
 
 [runtime.container]
 engine = "auto"
-image = "ghcr.io/<owner>/pwnbridge-pwn@sha256:<digest>"
+image = "ghcr.io/simonfalke-01/pwnbridge-pwn@sha256:<digest>"
 workdir = "/work"
 network = "bridge"
 ```
