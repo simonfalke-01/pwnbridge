@@ -125,14 +125,14 @@ global default_host
 default) or an absolute server-local path such as `/srv/pwnbridge/workspaces`.
 Pwnbridge always appends its installation and workspace identity beneath it.
 
-`shell_transport` is host-local network policy: `auto` prefers predictive Mosh
-and falls back to SSH, `mosh` requires it, and `ssh` disables it. `mosh_port`
-is one UDP port or an inclusive ascending range passed to Mosh. The default is
-`60000:61000`; open the same range on the remote firewall/security group.
-Mosh is used only for the interactive PTY. Authentication, file barriers,
-debugger control, one-shot commands, and cleanup remain on OpenSSH. Explicit
-`terminal.scope = "remote"` uses SSH because its nested multiplexer control is
-not compatible with the Mosh path.
+`shell_transport` is host-local interactive policy. `auto` uses pwnbridge's
+predictive local echo over an inline SSH PTY, `ssh` uses plain SSH without
+prediction, and `mosh` explicitly selects Mosh's roaming full-screen terminal.
+`mosh_port` is one UDP port or an inclusive ascending range passed to Mosh. The
+default is `60000:61000`; open the same range on the remote firewall/security
+group only when selecting Mosh. Authentication, file barriers, debugger
+control, one-shot commands, and cleanup remain on OpenSSH. Explicit
+`terminal.scope = "remote"` is not compatible with the Mosh path.
 
 ### Synchronization
 

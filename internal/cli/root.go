@@ -100,7 +100,7 @@ func (a *App) Root() *cobra.Command {
 	root.Flags().BoolP("version", "v", false, "version for pwnbridge")
 	root.PersistentFlags().StringVar(&a.HostFlag, "host", "", "override the configured remote host")
 	root.AddCommand(
-		&cobra.Command{Use: "shell", Short: "Open the managed shell (Mosh with SSH fallback)", Long: "Open managed remote Bash. The selected host's shell_transport setting chooses predictive Mosh or SSH; auto prefers Mosh and safely falls back to SSH when its prerequisites are unavailable.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
+		&cobra.Command{Use: "shell", Short: "Open the managed remote shell", Long: "Open managed remote Bash in the current terminal. The default auto transport uses pwnbridge predictive echo over inline SSH. Select ssh for plain SSH or mosh for an explicit roaming, full-screen Mosh session.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
 		a.runCommand(), a.initCommand(), a.statusCommand(), a.doctorCommand(), a.stopCommand(), a.cleanCommand(),
 		a.hostCommand(), a.syncCommand(), a.terminalCommand(), a.runtimeCommand(), a.configCommand(), a.versionCommand(),
 		a.paneCommand(),
@@ -568,10 +568,12 @@ func (a *App) shell(ctx context.Context) (result error) {
 	}
 	cmd := session.Master.Command(ctx, true, "shell", encoded)
 	proxy := shell.Proxy{In: a.In, Out: a.Out, Err: a.Err, Nonce: session.Nonce, Barrier: func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }}
-	if selectedTransport == "mosh" {
+	if selectedTransport == "inline" {
+		proxy.PredictEcho = true
+	} else if selectedTransport == "mosh" {
 		progress.Stage("Opening Mosh shell")
 		cmd = session.Master.MoshCommand(ctx, "shell", encoded, p.Host.MoshPort)
-		proxy.Nonce, proxy.Barrier = "", nil
+		proxy.Nonce, proxy.Barrier, proxy.ExitNotice = "", nil, "[mosh is exiting.]"
 	}
 	progress.Stop()
 	if err := proxy.Run(ctx, cmd); ctx.Err() != nil {
@@ -585,6 +587,9 @@ func shellTransport(host config.Host, terminalScope string, session *activeSessi
 	wanted := host.ShellTransport
 	if wanted == "" {
 		wanted = "auto"
+	}
+	if wanted == "auto" {
+		return "inline", nil
 	}
 	if wanted == "ssh" {
 		return "ssh", nil
@@ -851,7 +856,7 @@ func (a *App) hostCommand() *cobra.Command {
 
 func (a *App) hostTransport() *cobra.Command {
 	var moshPort string
-	cmd := &cobra.Command{Use: "transport NAME auto|mosh|ssh", Short: "Set a host's interactive shell transport", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "transport NAME auto|mosh|ssh", Short: "Set a host's interactive shell transport", Long: "Set a host's interactive shell transport. auto uses pwnbridge predictive echo over inline SSH, ssh disables prediction, and mosh explicitly selects a roaming full-screen Mosh session.", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -875,7 +880,14 @@ func (a *App) hostTransport() *cobra.Command {
 		if port == "" {
 			port = "60000:61000"
 		}
-		fmt.Fprintf(a.Out, "host %s shell transport: %s (Mosh UDP %s)\n", args[0], host.ShellTransport, port)
+		switch host.ShellTransport {
+		case "auto":
+			fmt.Fprintf(a.Out, "host %s shell transport: auto (predictive inline SSH)\n", args[0])
+		case "ssh":
+			fmt.Fprintf(a.Out, "host %s shell transport: ssh (plain inline SSH)\n", args[0])
+		default:
+			fmt.Fprintf(a.Out, "host %s shell transport: mosh (roaming full-screen, UDP %s)\n", args[0], port)
+		}
 		return nil
 	}}
 	cmd.Flags().StringVar(&moshPort, "mosh-port", "", "remote UDP port or range for Mosh")
@@ -911,7 +923,7 @@ func (a *App) hostAdd() *cobra.Command {
 		fmt.Fprintf(a.Out, "added host %s (%s)\n", name, args[1])
 		return nil
 	}}
-	cmd.Flags().StringVar(&shellTransport, "shell-transport", "auto", "interactive shell transport: auto, mosh, or ssh")
+	cmd.Flags().StringVar(&shellTransport, "shell-transport", "auto", "interactive shell: auto (predictive SSH), ssh (plain), or mosh (roaming)")
 	cmd.Flags().StringVar(&moshPort, "mosh-port", "60000:61000", "remote UDP port or range for Mosh")
 	return cmd
 }

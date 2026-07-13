@@ -69,7 +69,7 @@ If a control master fails, inspect server policy for TCP/stream-local
 forwarding. Normal non-GDB commands need SSH but not broker forwarding. Use
 explicit remote multiplexer scope if all reverse forwarding is prohibited.
 
-## Mosh falls back to SSH or cannot connect
+## Explicit Mosh cannot connect
 
 Inspect both ends and the selected host record:
 
@@ -80,11 +80,12 @@ pwnbridge host show x86
 pwnbridge doctor
 ```
 
-With `shell_transport = "auto"`, Pwnbridge uses SSH when Mosh, `mosh-server`,
-the authenticated reverse synchronization bridge, or host terminal scope is
-unavailable. Set `shell_transport = "mosh"` to turn fallback into an explicit
-startup error, or run `pwnbridge host transport x86 mosh`.
-`terminal.scope = "remote"` intentionally uses SSH.
+The default `shell_transport = "auto"` does not use Mosh: it provides immediate
+local typing over an inline SSH PTY. Run `pwnbridge host transport x86 mosh` to
+opt into Mosh; missing local Mosh, `mosh-server`, the authenticated reverse
+synchronization bridge, or a compatible host terminal scope then produces an
+explicit startup error. `terminal.scope = "remote"` is intentionally
+incompatible with Mosh.
 
 If Mosh starts but never connects, allow the configured `mosh_port` UDP range
 (default 60000–61000) through the Ubuntu firewall and any cloud security group.

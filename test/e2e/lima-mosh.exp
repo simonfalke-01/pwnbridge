@@ -1,5 +1,6 @@
 #!/usr/bin/expect -f
 set timeout 90
+log_file -noappend $env(PWNBRIDGE_E2E_MOSH_LOG)
 
 set root $env(PWNBRIDGE_E2E_ROOT)
 spawn -noecho $root/bin/pwnbridge
@@ -13,6 +14,9 @@ expect {
 set f [open "mosh-save-barrier.txt" "w"]
 puts -nonewline $f "fresh-local-content"
 close $f
+# Give Mutagen's filesystem watcher a scheduling turn before exercising the
+# remote barrier. The barrier still has to flush and verify the change.
+after 300
 send -- "cat mosh-save-barrier.txt\r"
 expect {
     -re {fresh-local-content} {}

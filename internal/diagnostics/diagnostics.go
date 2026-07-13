@@ -29,14 +29,11 @@ func Local(ctx context.Context, mutagen syncer.Mutagen, shellTransport string) [
 		}
 		checks = append(checks, check)
 	}
-	if shellTransport != "ssh" {
+	if shellTransport == "mosh" {
 		path, moshErr := exec.LookPath("mosh")
 		check := Check{Name: "mosh", OK: moshErr == nil, Detail: path, Remediation: "brew install mosh"}
 		if moshErr != nil {
 			check.Detail = moshErr.Error()
-			if shellTransport == "" || shellTransport == "auto" {
-				check.OK, check.Detail, check.Remediation = true, "unavailable; auto transport will use SSH", ""
-			}
 		}
 		checks = append(checks, check)
 	}
@@ -82,12 +79,9 @@ func Remote(ctx context.Context, client transport.Client, containerEngine string
 				ok := agentProbe.Tools[required]
 				checks = append(checks, Check{Name: "remote-" + required, OK: ok, Detail: fmt.Sprintf("available=%t", ok), Remediation: "run pwnbridge host bootstrap"})
 			}
-			if shellTransport != "ssh" {
+			if shellTransport == "mosh" {
 				ok := agentProbe.Tools["mosh-server"]
 				check := Check{Name: "remote-mosh-server", OK: ok, Detail: fmt.Sprintf("available=%t", ok), Remediation: "run pwnbridge host bootstrap"}
-				if !ok && (shellTransport == "" || shellTransport == "auto") {
-					check.OK, check.Detail, check.Remediation = true, "unavailable; auto transport will use SSH", ""
-				}
 				checks = append(checks, check)
 			}
 			if containerEngine != "" {

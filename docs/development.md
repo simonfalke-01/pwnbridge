@@ -66,7 +66,7 @@ Individual scenarios:
 |---|---|
 | `lima.sh` | real ret2win, x86-64, artifacts, conflicts/spaces, root deletion |
 | `lima-shell.sh` | SSH save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
-| `lima-mosh.sh` | predictive Mosh shell, remote pre/post barriers, artifacts, resize |
+| `lima-mosh.sh` | explicit roaming Mosh, no exit banner, remote pre/post barriers, artifacts, resize |
 | `lima-disconnect.sh` | forced SSH-master loss, terminal restoration, reconnect, preserved data |
 | `lima-gdb.sh` | debug, attach, API, concurrent panes, selectable host provider |
 | `lima-gdb-tui.sh` | real GDB TUI PTY and 30x90 to 45x120 resize propagation |

@@ -9,6 +9,11 @@ expect {
     timeout { puts stderr "managed shell did not present a prompt"; exit 1 }
     eof { puts stderr "managed shell exited before prompt"; exit 1 }
 }
+set startup $expect_out(buffer)
+if {[string first "\033\[2J" $startup] >= 0 || [string first "\033\[?1049h" $startup] >= 0} {
+    puts stderr "default managed shell cleared or replaced the current terminal screen"
+    exit 1
+}
 
 set f [open "save-barrier.txt" "w"]
 puts -nonewline $f "new-local-content"

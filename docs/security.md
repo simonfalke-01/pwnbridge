@@ -119,9 +119,10 @@ Mosh shells cannot use the local OSC marker parser. Their generated Bash hook
 invokes a private hardlink of the deployed agent, which loads mode-private
 session state and sends an authenticated `barrier` request over the reverse SSH
 bridge. The broker validates protocol, session ID, and the random 256-bit token
-before touching synchronization. If that bridge is missing, auto transport
-uses SSH and forced Mosh fails closed. Environment filtering prevents broker
-credentials from being inherited from the local machine.
+before touching synchronization. If that bridge is missing, explicit Mosh
+fails closed; the default predictive SSH transport remains available.
+Environment filtering prevents broker credentials from being inherited from
+the local machine.
 
 ## Process and environment handling
 

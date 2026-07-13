@@ -22,7 +22,10 @@ export PATH="$ROOT/test/e2e/bin:$PATH"
 export PWNBRIDGE_AGENT_PATH="$ROOT/bin/pwnbridge-agent-linux-amd64"
 export PWNBRIDGE_E2E_ROOT="$ROOT"
 
-cp "$ROOT/../ret2win" "$TMP/challenge/ret2win"
+# The shell lifecycle case only needs a real Linux amd64 executable in the
+# workspace; reuse the agent produced by `make build` instead of depending on a
+# challenge binary outside this repository.
+cp "$ROOT/bin/pwnbridge-agent-linux-amd64" "$TMP/challenge/ret2win"
 chmod +x "$TMP/challenge/ret2win"
 cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" host add lima lima-pwn

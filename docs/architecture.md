@@ -107,21 +107,30 @@ This gives two important guarantees:
 
 One-shot `run` performs the same pre/post barriers without prompt markers.
 
-## Mosh terminal and OpenSSH control plane
+## Predictive inline shell and optional Mosh
 
-Interactive host-scope shells default to `shell_transport = "auto"`. When the
-local `mosh` client, remote `mosh-server`, and authenticated reverse bridge are
-available, Pwnbridge launches Mosh with `--predict=always` and the host's UDP
-port/range. This gives local predictive echo while retaining a real remote PTY.
-Mosh reuses the private SSH control socket for its initial authentication.
+Interactive host-scope shells default to `shell_transport = "auto"`. Pwnbridge
+runs the ordinary SSH PTY inline and predicts printable prompt input locally.
+Matching remote terminal echo is reconciled out of the stream; any mismatch,
+control sequence, readline redraw, or program output remains remote-authoritative.
+This byte-stream design preserves the surrounding terminal history and avoids
+the viewport clear inherent in a screen-state protocol. `shell_transport =
+"ssh"` uses the same path with prediction disabled.
+
+`shell_transport = "mosh"` explicitly selects Mosh with `--predict=always` and
+the host's UDP port/range. Mosh retains its native full-screen roaming and
+reconnection model; it is not used automatically. The PTY proxy removes Mosh's
+exact normal-exit banner without buffering earlier output, while connection and
+server errors remain visible. Mosh reuses the private SSH control socket for
+initial authentication.
 
 Mosh does not carry arbitrary SSH channels or Pwnbridge's OSC prompt marker.
 The generated Mosh Bash rcfile therefore performs pre-command and post-command
 barriers through a private agent hardlink and authenticated broker message. A
 failed pre-command DEBUG trap returns nonzero under Bash `extdebug`, so Bash
 skips the pending command. The broker address, 256-bit token, and session ID
-remain private per-session state. SSH is selected when auto prerequisites are
-missing; explicit `shell_transport = "mosh"` fails closed.
+remain private per-session state. Explicit `shell_transport = "mosh"` fails
+closed when its prerequisites are unavailable.
 
 `pwnbridge run`, synchronization, agent deployment, cleanup, debugger control,
 and all noninteractive operations always use OpenSSH.
@@ -150,10 +159,9 @@ available, that TCP endpoint is re-exposed as the same private Unix socket so a
 bridge-network container can still reach it. All fallbacks require an
 end-to-end authenticated ping before a host-pane debugger is enabled. If both
 forwarding forms are unavailable, Pwnbridge keeps the control master and normal
-SSH shell/run channels, omits broker credentials, and reports that host-pane
-GDB is unavailable. Auto transport also falls back to SSH because a Mosh shell
-could not authenticate its synchronization barriers. Remote tmux/Zellij scope
-needs no broker forward and uses SSH for its managed shell.
+predictive/plain SSH shell and run channels, omits broker credentials, and
+reports that host-pane GDB and explicit Mosh are unavailable. Remote
+tmux/Zellij scope needs no broker forward and uses SSH for its managed shell.
 
 ## Agent protocol and process execution
 

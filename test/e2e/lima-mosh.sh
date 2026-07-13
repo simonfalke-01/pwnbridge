@@ -27,6 +27,7 @@ export XDG_CACHE_HOME="$TMP/cache"
 export PATH="$ROOT/test/e2e/bin:$PATH"
 export PWNBRIDGE_AGENT_PATH="$ROOT/bin/pwnbridge-agent-linux-amd64"
 export PWNBRIDGE_E2E_ROOT="$ROOT"
+export PWNBRIDGE_E2E_MOSH_LOG="$TMP/mosh.log"
 
 # QEMU user networking exposes Lima SSH on loopback. Add one private UDP
 # forward for the test and remove it during cleanup. Other Lima networks can
@@ -44,4 +45,8 @@ cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" host add lima lima-pwn --shell-transport mosh --mosh-port 60000
 "$ROOT/bin/pwnbridge" host use lima
 expect "$ROOT/test/e2e/lima-mosh.exp"
+if grep -F '[mosh is exiting.]' "$PWNBRIDGE_E2E_MOSH_LOG" >/dev/null; then
+    echo "normal Mosh exit notice leaked into the terminal" >&2
+    exit 1
+fi
 "$ROOT/bin/pwnbridge" clean --remote --yes

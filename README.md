@@ -21,8 +21,9 @@ shown, remote artifacts are synchronized back to the Mac.
 ## What it provides
 
 - A bidirectional, conflict-safe workspace powered by external Mutagen 0.18.1.
-- A predictive Mosh PTY for instant local echo, with automatic SSH fallback,
-  signals, job control, readline, resize, and interactive programs.
+- An inline SSH PTY with pwnbridge predictive echo for instant typing,
+  preserved terminal history, signals, job control, readline, resize, and
+  interactive programs; explicit Mosh remains available for roaming sessions.
 - Structural argv execution with ordinary remote exit statuses.
 - Transparent pwntools `gdb.debug()`, `gdb.attach()`, and `api=True` support.
 - First-class local Zellij and tmux panes, plus WezTerm, Kitty, iTerm2,
@@ -41,7 +42,7 @@ On the Mac:
 
 - macOS on ARM64 or AMD64
 - OpenSSH (`ssh` and `scp`)
-- Mosh client
+- Mosh client (only for explicit `shell_transport = "mosh"`)
 - Mutagen exactly 0.18.1
 - one supported terminal provider; Terminal.app is always the fallback
 
@@ -49,8 +50,7 @@ On the remote:
 
 - Ubuntu or Debian Linux amd64
 - an SSH account whose normal OpenSSH configuration already works
-- `mosh-server` and inbound UDP 60000–61000 (installed by bootstrap; optional
-  when `shell_transport = "ssh"`)
+- optional `mosh-server` and inbound UDP 60000–61000 for explicit Mosh
 - roughly 1 GiB free for bootstrap tools
 - optional rootless Podman or Docker for container runtime
 
@@ -60,8 +60,8 @@ to work. It never edits SSH, shell, or GDB dotfiles.
 
 ## Install
 
-Install the native Mac client, bundled Linux amd64 agent, Mutagen and Mosh
-dependencies, and shell completions in one command:
+Install the native Mac client, bundled Linux amd64 agent, Mutagen, optional
+Mosh transport, and shell completions in one command:
 
 ```console
 brew install simonfalke-01/pwnbridge/pwnbridge
@@ -85,7 +85,8 @@ For a source build, keep the Linux agent adjacent to the client, or set
 archives place it adjacent automatically. Homebrew installs it in formula
 `libexec`, where Pwnbridge finds it automatically.
 
-Source builds also require Mutagen 0.18.1 and Mosh:
+Source builds require Mutagen 0.18.1. Install Mosh as well if you want the
+explicit roaming transport:
 
 ```console
 brew install mutagen-io/mutagen/mutagen mosh
@@ -120,15 +121,17 @@ pwnbridge host bootstrap x86 --profile pwn
 idempotent, installs a user-owned pwntools 4.15 environment, supports
 `--dry-run`, and can validate an already-prepared host with `--no-sudo`.
 It also installs `mosh-server` and checks reverse forwarding. Open UDP
-60000–61000 on the host firewall/security group for Mosh. If either Mosh or the
-authenticated sync bridge is unavailable, `shell_transport = "auto"` uses SSH;
-one-shot `run` always uses SSH.
+60000–61000 on the host firewall/security group only when using explicit Mosh.
+The default `shell_transport = "auto"` uses pwnbridge predictive echo over an
+inline SSH PTY; one-shot `run` always uses SSH.
 
-Force either behavior, or narrow the UDP range, without editing TOML:
+Select plain SSH or explicit Mosh, or narrow Mosh's UDP range, without editing
+TOML:
 
 ```console
 pwnbridge host transport x86 mosh --mosh-port 60000:60100
 pwnbridge host transport x86 ssh
+pwnbridge host transport x86 auto
 ```
 
 ### What gets installed remotely

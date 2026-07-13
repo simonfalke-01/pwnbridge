@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/creack/pty"
@@ -56,6 +57,66 @@ func TestProxyRestoresTerminalAfterTransportExit(t *testing.T) {
 	}
 	if !reflect.DeepEqual(before, after) {
 		t.Fatalf("PTY state changed after failure: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestExitNoticeFilterSuppressesBannerAcrossChunksWithoutBufferingOutput(t *testing.T) {
+	var output bytes.Buffer
+	filter := newExitNoticeFilter(&output, "[mosh is exiting.]")
+	if _, err := filter.Write([]byte("normal output\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "normal output\r\n" {
+		t.Fatalf("ordinary output was delayed: %q", got)
+	}
+	for _, chunk := range []string{"[mosh is", " exiting.]", "\r", "\n"} {
+		if _, err := filter.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := filter.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "normal output\r\n" {
+		t.Fatalf("filtered output = %q", got)
+	}
+
+	output.Reset()
+	filter = newExitNoticeFilter(&output, "[mosh is exiting.]")
+	_, _ = filter.Write([]byte("program printed [mosh is exiting!] but kept running\r\nreal error\r\n"))
+	if err := filter.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "[mosh is exiting!]") || !strings.Contains(output.String(), "real error") {
+		t.Fatalf("non-terminal output was suppressed: %q", output.String())
+	}
+}
+
+func TestEchoPredictorRendersInputAndSuppressesMatchingRemoteEcho(t *testing.T) {
+	var output bytes.Buffer
+	predictor := &echoPredictor{out: &output}
+	predictor.Predict([]byte("typed"))
+	if got := output.String(); got != "typed" {
+		t.Fatalf("prediction was not rendered immediately: %q", got)
+	}
+	if _, err := predictor.Write([]byte("typed\r\nresult\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "typed\r\nresult\r\n" {
+		t.Fatalf("remote echo was not reconciled: %q", got)
+	}
+}
+
+func TestEchoPredictorLeavesControlsAndRemoteCorrectionsAuthoritative(t *testing.T) {
+	var output bytes.Buffer
+	predictor := &echoPredictor{out: &output}
+	predictor.Predict([]byte("ok\x1b[D\x7f\r"))
+	if got := output.String(); got != "ok" {
+		t.Fatalf("control input was predicted: %q", got)
+	}
+	_, _ = predictor.Write([]byte("oX\bK"))
+	if got := output.String(); got != "okX\bK" {
+		t.Fatalf("remote correction was hidden: %q", got)
 	}
 }
 

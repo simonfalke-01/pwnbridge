@@ -6,8 +6,12 @@
 
 Open managed interactive Bash in the synchronized remote workspace. Bare
 `pwnbridge` is identical. Pre-command Enter and post-command prompt are guarded
-by synchronization barriers. The host's `shell_transport` selects predictive
-Mosh or SSH; `auto` prefers Mosh when both ends and the sync bridge are ready.
+by synchronization barriers. The default `auto` transport adds pwnbridge local
+echo prediction to the normal inline SSH stream, so typing appears immediately
+without clearing the screen or losing shell history. `ssh` disables prediction.
+`mosh` is an explicit opt-in for users who prefer roaming and reconnection; it
+uses Mosh's full-screen terminal model. Pwnbridge suppresses Mosh's normal exit
+banner while leaving connection and server errors visible.
 
 The installed `pb` executable is the concise one-shot interface. `pb COMMAND
 [ARG...]` is equivalent to `pwnbridge run -- COMMAND [ARG...]` with automatic
@@ -29,9 +33,9 @@ IDs. It does not create a workspace.
 
 ### `pwnbridge doctor [--json]`
 
-Check local platform/OpenSSH/Mosh/Mutagen and, when a host is selected, deploy the
-diagnostic agent and check platform, distro, disk/inodes, writable home,
-ptrace, pwntools, and required tools.
+Check local platform/OpenSSH/Mutagen and configured transport prerequisites.
+When a host is selected, deploy the diagnostic agent and check platform,
+distro, disk/inodes, writable home, ptrace, pwntools, and required tools.
 
 ### `pwnbridge stop`
 
@@ -80,11 +84,12 @@ Doctor/bootstrap probe reverse forwarding; unavailable forwarding is fatal to
 host-pane diagnostics but not to shell/run or explicit remote-multiplexer
 scope.
 
-`auto` is the default interactive transport. It uses Mosh with
-`--predict=always`, or SSH when the local client, remote `mosh-server`, reverse
-sync bridge, or compatible host terminal scope is unavailable. `mosh` makes
-those prerequisites mandatory; `ssh` disables Mosh. One-shot `run`, sync,
-cleanup, and broker control continue to use the private SSH master.
+`auto` is the default interactive transport and uses pwnbridge predictive echo
+over an inline SSH PTY. `ssh` uses the same PTY without prediction. `mosh`
+explicitly selects Mosh and requires the local client, remote `mosh-server`,
+reverse sync bridge, compatible host terminal scope, and configured UDP path.
+One-shot `run`, sync, cleanup, and broker control always use the private SSH
+master.
 `host transport` updates only the named machine-wide host record; it does not
 change the machine default or the current project's host binding.
 

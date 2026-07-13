@@ -29,7 +29,7 @@ func testApp(t *testing.T) (*App, *bytes.Buffer) {
 	return &App{Paths: p, In: os.Stdin, Out: output, Err: output}, output
 }
 
-func TestShellTransportAutoPrefersMoshAndForcedModeFailsClosed(t *testing.T) {
+func TestShellTransportAutoUsesInlinePredictionAndForcedMoshFailsClosed(t *testing.T) {
 	mosh := filepath.Join(t.TempDir(), "mosh")
 	if err := os.WriteFile(mosh, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -40,12 +40,12 @@ func TestShellTransportAutoPrefersMoshAndForcedModeFailsClosed(t *testing.T) {
 		Master: &transport.Master{Client: transport.Client{Mosh: mosh}},
 		Probe:  transport.HostProbe{Tools: map[string]bool{"mosh-server": true}},
 	}
-	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "mosh" {
+	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "inline" {
 		t.Fatalf("auto transport = %q, %v", got, err)
 	}
 	session.Probe.Tools["mosh-server"] = false
-	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "ssh" {
-		t.Fatalf("auto fallback = %q, %v", got, err)
+	if got, err := shellTransport(config.Host{ShellTransport: "auto"}, "host", session); err != nil || got != "inline" {
+		t.Fatalf("auto transport without Mosh = %q, %v", got, err)
 	}
 	if _, err := shellTransport(config.Host{ShellTransport: "mosh"}, "host", session); err == nil || !strings.Contains(err.Error(), "mosh-server") {
 		t.Fatalf("forced Mosh did not fail closed: %v", err)

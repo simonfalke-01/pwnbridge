@@ -83,7 +83,7 @@ export PWNBRIDGE_AGENT_PATH="$PWD/bin/pwnbridge-agent-linux-amd64"
 
 ## Mutagen
 
-Install Mutagen exactly 0.18.1 and Mosh for a source build:
+Install Mutagen exactly 0.18.1. Mosh is optional unless you select it explicitly:
 
 ```console
 brew install mutagen-io/mutagen/mutagen mosh
@@ -142,9 +142,10 @@ pwnbridge host bootstrap x86
 The host name is a small local identifier (ASCII letters, digits, `.`, `_`, and
 `-`); the destination remains your normal OpenSSH alias. Doctor verifies the
 remote platform, toolchain, disk/inodes, ptrace, pinned pwntools environment,
-Mosh, reverse forwarding, and the configured container engine. Forwarding
-failure makes `shell_transport = "auto"` fall back to SSH and does not prevent
-ordinary shell/run or `terminal.scope = "remote"` operation.
+reverse forwarding, configured container engine, and explicit Mosh
+prerequisites when selected. Mosh and forwarding diagnostics do not prevent the
+default predictive inline shell, plain SSH, one-shot runs, or
+`terminal.scope = "remote"` operation.
 
 The profile installs `mosh-server` and standard build/debug packages, creates
 `~/.local/share/pwnbridge/envs/pwn-v1`, and enforces pwntools 4.15.0. The static
