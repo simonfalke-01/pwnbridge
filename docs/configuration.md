@@ -49,7 +49,7 @@ engine = "mutagen"
 mode = "two-way-safe"
 watch_mode = "portable"
 symlink_mode = "portable"
-pause_on_idle = true
+pause_on_idle = false
 barrier_timeout = "2m"
 
 [terminal]
@@ -122,8 +122,10 @@ cross-platform risk.
 
 `barrier_timeout` is any positive Go duration such as `30s`, `2m`, or `5m`.
 It applies to synchronization barriers, not the lifetime of a remote command.
-When `pause_on_idle` is true, the final session lease flushes and pauses the
-Mutagen session.
+The default `pause_on_idle = false` keeps Mutagen's lightweight synchronization
+session warm between commands, which makes repeated launches faster. When it is
+true, the final session lease flushes and pauses Mutagen; `pwnbridge stop`
+always provides an explicit flush-and-pause operation.
 
 ### Terminal
 

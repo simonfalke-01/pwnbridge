@@ -206,7 +206,7 @@ bootstrap_profile = "pwn"
 
 [sync]
 engine = "mutagen"
-pause_on_idle = true
+pause_on_idle = false
 barrier_timeout = "2m"
 
 [terminal]

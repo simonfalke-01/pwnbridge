@@ -122,7 +122,7 @@ func Defaults() Effective {
 			Hosts:  map[string]Host{},
 			Sync: Sync{
 				Engine: "mutagen", Mode: "two-way-safe", WatchMode: "portable",
-				SymlinkMode: "portable", PauseOnIdle: true,
+				SymlinkMode: "portable", PauseOnIdle: false,
 				BarrierTimeout: 2 * time.Minute, BarrierText: "2m",
 			},
 			Terminal: Terminal{

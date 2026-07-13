@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,7 @@ type Client struct {
 	SCP         string
 	Destination string
 	AgentPath   string
+	ControlPath string
 }
 
 type HostProbe struct {
@@ -66,6 +68,12 @@ func (c Client) BasicProbe(ctx context.Context) (HostProbe, error) {
 		return HostProbe{}, err
 	}
 	return parseBasicProbe(out)
+}
+
+// Raw runs a non-interactive command on the destination. When the client was
+// obtained from a Master, it automatically reuses that private connection.
+func (c Client) Raw(ctx context.Context, command string) ([]byte, error) {
+	return c.run(ctx, "-T", c.Destination, command)
 }
 
 func parseBasicProbe(out []byte) (HostProbe, error) {
@@ -171,7 +179,12 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 		_, _ = c.run(cleanupCtx, "-T", c.Destination, "rm -f -- "+shellQuote(tmp))
 	}()
 	target := c.Destination + ":" + tmp
-	cmd := exec.CommandContext(ctx, c.SCP, "-q", "--", localPath, target)
+	args := []string{"-q"}
+	if c.ControlPath != "" {
+		args = append(args, "-o", "ControlPath="+c.ControlPath)
+	}
+	args = append(args, "--", localPath, target)
+	cmd := exec.CommandContext(ctx, c.SCP, args...)
 	cmd.Env = SafeSSHEnvironment()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -227,7 +240,7 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 		return nil, err
 	}
 	control := filepath.Join(runtimeDir, "c")
-	args := []string{"-M", "-N", "-S", control,
+	args := []string{"-q", "-M", "-N", "-S", control,
 		"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o", "ClearAllForwardings=yes",
 		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ForwardAgent=no",
 		"-o", "ForwardX11=no", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindMask=0177",
@@ -238,18 +251,25 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 	// cancel forwards. It is terminated explicitly by Master.Close.
 	cmd := exec.Command(c.SSH, args...)
 	cmd.Env = SafeSSHEnvironment()
+	var masterOutput bytes.Buffer
 	cmd.Stdin = nil
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = &masterOutput
+	cmd.Stderr = &masterOutput
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	master := &Master{Client: c, ControlPath: control, process: cmd, done: make(chan error, 1)}
+	masterClient := c
+	masterClient.ControlPath = control
+	master := &Master{Client: masterClient, ControlPath: control, process: cmd, done: make(chan error, 1)}
 	go func() { master.done <- cmd.Wait() }()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		select {
 		case processErr := <-master.done:
+			detail := strings.TrimSpace(masterOutput.String())
+			if detail != "" {
+				return nil, fmt.Errorf("SSH control master exited during startup: %w: %s", processErr, detail)
+			}
 			return nil, fmt.Errorf("SSH control master exited during startup: %w", processErr)
 		default:
 		}
@@ -266,6 +286,17 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 	}
 	_ = master.Close()
 	return nil, errors.New("SSH control master did not become ready")
+}
+
+// ConfigureBroker adds debugger-broker forwarding to an already connected
+// master. Keeping this separate from StartControlMaster lets launch setup and
+// agent probes reuse the same SSH connection.
+func (m *Master) ConfigureBroker(ctx context.Context, localBroker, remoteBroker, localTCP string) error {
+	m.RemoteSocket, m.LocalSocket = remoteBroker, localBroker
+	if localBroker == "" || remoteBroker == "" {
+		return nil
+	}
+	return m.addBrokerForward(ctx, localTCP)
 }
 
 func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
@@ -383,9 +414,24 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 func (c Client) sshCommand(ctx context.Context, args ...string) *exec.Cmd {
+	if c.ControlPath != "" && !hasControlPath(args) {
+		args = append([]string{"-S", c.ControlPath}, args...)
+	}
 	cmd := exec.CommandContext(ctx, c.SSH, args...)
 	cmd.Env = SafeSSHEnvironment()
 	return cmd
+}
+
+func hasControlPath(args []string) bool {
+	for index, arg := range args {
+		if arg == "-S" || strings.HasPrefix(arg, "-S") && len(arg) > 2 {
+			return true
+		}
+		if arg == "-o" && index+1 < len(args) && strings.HasPrefix(strings.ToLower(args[index+1]), "controlpath=") {
+			return true
+		}
+	}
+	return false
 }
 
 // SafeSSHEnvironment keeps authentication/configuration environment available

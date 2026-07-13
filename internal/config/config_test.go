@@ -26,7 +26,7 @@ func TestLoadDefaults(t *testing.T) {
 	if e.ProjectRoot != root {
 		t.Fatalf("root = %q, want %q", e.ProjectRoot, root)
 	}
-	if e.Global.Sync.Mode != "two-way-safe" || !e.Global.Sync.PauseOnIdle {
+	if e.Global.Sync.Mode != "two-way-safe" || e.Global.Sync.PauseOnIdle {
 		t.Fatalf("bad defaults: %#v", e.Global.Sync)
 	}
 	if e.Global.Terminal.Provider != "auto" || !e.Global.Terminal.Focus {

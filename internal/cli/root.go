@@ -149,7 +149,7 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 	return &projectContext{Config: effective, HostID: hostID, Host: host, WS: ws, State: state, Manager: manager, Sync: mutagen}, nil
 }
 
-func (a *App) ensureSync(ctx context.Context, p *projectContext) error {
+func (a *App) ensureSync(ctx context.Context, p *projectContext, client transport.Client) error {
 	if p.Config.Global.Sync.SymlinkMode == "posix-raw" {
 		fmt.Fprintln(a.Err, "warning: sync.symlink_mode=posix-raw preserves raw links and can create cross-platform escape targets; portable is safer")
 	}
@@ -165,7 +165,7 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext) error {
 		remoteOperation = "test -d " + remotePath + " && test ! -L " + remotePath
 		operation = "validate"
 	}
-	if output, remoteErr := sshCommand(ctx, "-T", p.Host.Destination, remoteOperation).CombinedOutput(); remoteErr != nil {
+	if output, remoteErr := client.Raw(ctx, remoteOperation); remoteErr != nil {
 		if operation == "validate" {
 			return fmt.Errorf("remote workspace root is missing or was replaced; execution is blocked to protect the local copy. Verify local files, then run `pwnbridge clean` to explicitly create new synchronization history: %w: %s", remoteErr, strings.TrimSpace(string(output)))
 		}
@@ -182,9 +182,6 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext) error {
 		return err
 	}
 	if err := p.Manager.SaveState(p.WS, p.State); err != nil {
-		return err
-	}
-	if err := p.Sync.Resume(timeout, p.State.MutagenIdentifier); err != nil {
 		return err
 	}
 	return nil
@@ -252,30 +249,15 @@ func guardImplicitWorkspace(root, projectConfig string) error {
 	return fmt.Errorf("refusing to synchronize implicit workspace %s: it exceeds the automatic safety limit (at least %.1f GiB or %d files); cd into the challenge directory, or run `pwnbridge init` here to explicitly confirm this project root", root, float64(bytes)/(1<<30), files)
 }
 
-func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSession, error) {
+func (a *App) startSession(ctx context.Context, p *projectContext, progress *launchProgress) (session *activeSession, resultErr error) {
+	progress.Stage("Checking workspace")
 	if err := guardImplicitWorkspace(p.Config.ProjectRoot, p.Config.ProjectPath); err != nil {
 		return nil, err
 	}
 	if _, err := a.liveSessions(p.WS.LocalRoot); err != nil {
 		return nil, err
 	}
-	if err := a.ensureSync(ctx, p); err != nil {
-		return nil, err
-	}
-	if err := a.barrier(ctx, p); err != nil {
-		return nil, err
-	}
 	asset, err := transport.FindAgentAsset(p.Config.AgentPath)
-	if err != nil {
-		return nil, err
-	}
-	client := transport.New(p.Host.Destination, "")
-	remoteAgent, err := client.DeployAgent(ctx, asset)
-	if err != nil {
-		return nil, err
-	}
-	client.AgentPath = remoteAgent
-	probe, err := client.ProbeAgent(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -299,19 +281,70 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
+	var b *broker.Broker
+	var master *transport.Master
+	var lease *workspace.Lock
+	var recordPath, leasePath string
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		if b != nil {
+			_ = b.Close()
+		}
+		if master != nil {
+			_ = master.Close()
+		}
+		if recordPath != "" {
+			_ = os.Remove(recordPath)
+		}
+		if lease != nil {
+			_ = lease.Close()
+		}
+		if leasePath != "" {
+			_ = os.Remove(leasePath)
+		}
+		_ = os.RemoveAll(runtimeDir)
+	}()
+
+	progress.Stage("Connecting to " + p.HostID)
+	client := transport.New(p.Host.Destination, "")
+	master, err = client.StartControlMaster(ctx, runtimeDir)
+	if err != nil {
+		return nil, err
+	}
+	client = master.Client
+
+	progress.Stage("Syncing workspace")
+	if err := a.ensureSync(ctx, p, client); err != nil {
+		return nil, err
+	}
+	if err := a.barrier(ctx, p); err != nil {
+		return nil, err
+	}
+
+	progress.Stage("Preparing remote tools")
+	remoteAgent, err := client.DeployAgent(ctx, asset)
+	if err != nil {
+		return nil, err
+	}
+	client.AgentPath = remoteAgent
+	master.Client.AgentPath = remoteAgent
+	probe, err := client.ProbeAgent(ctx)
+	if err != nil {
+		return nil, err
+	}
 	remoteDir := filepath.Join(probe.Home, ".cache", "pwnbridge", "sessions", id)
 	localSocket := filepath.Join(runtimeDir, "b.sock")
 	remoteSocket := filepath.Join(remoteDir, "broker.sock")
 	prepare := "umask 077; mkdir -p -- " + remoteShellPath(filepath.Join(remoteDir, "requests"))
-	if output, prepareErr := sshCommand(ctx, "-T", p.Host.Destination, prepare).CombinedOutput(); prepareErr != nil {
-		os.RemoveAll(runtimeDir)
+	if output, prepareErr := client.Raw(ctx, prepare); prepareErr != nil {
 		return nil, fmt.Errorf("create remote session directory: %w: %s", prepareErr, strings.TrimSpace(string(output)))
 	}
-	recordPath := filepath.Join(a.Paths.State, "sessions", id+".json")
-	leasePath := recordPath + ".lease"
+	recordPath = filepath.Join(a.Paths.State, "sessions", id+".json")
+	leasePath = recordPath + ".lease"
 	executable, err := os.Executable()
 	if err != nil {
-		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
 	terminalConfig := p.Config.Global.Terminal
@@ -333,20 +366,17 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 			Workspace: p.WS.RemotePath, WorkspaceID: p.WS.ID, SessionDir: remoteDir,
 		},
 	}
-	var b *broker.Broker
-	var master *transport.Master
+	progress.Stage("Starting debugger bridge")
 	if p.Config.Global.Terminal.Scope == "remote" {
 		record.LocalSocket, record.RemoteSocket = "", ""
-		master, err = client.StartControlMaster(ctx, runtimeDir)
 	} else {
 		registry := provider.NewRegistry(runtimeDir)
 		b = broker.New(record, registry)
 		b.BeforeOpen = func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }
 		if err = b.Start(); err == nil {
 			record.LocalTCP = b.Record.LocalTCP
-			master, err = client.StartMaster(ctx, runtimeDir, localSocket, remoteSocket, record.LocalTCP)
+			err = master.ConfigureBroker(ctx, localSocket, remoteSocket, record.LocalTCP)
 			if err == nil && p.Config.Project.Runtime.Kind == "container" && strings.HasPrefix(master.BrokerAddress, "tcp:") {
-				_ = master.Close()
 				err = errors.New("container debugger panes require the remote socat relay for TCP forwarding fallback")
 			}
 		}
@@ -354,59 +384,31 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 			_ = b.Close()
 			b = nil
 			forwardErr := err
-			master, err = client.StartControlMaster(ctx, runtimeDir)
-			if err == nil {
-				record.LocalSocket, record.LocalTCP, record.RemoteSocket = "", "", ""
-				fmt.Fprintf(a.Err, "warning: debugger host panes are unavailable (%v); shell/run remain usable, or set terminal.scope=remote\n", forwardErr)
-			}
+			record.LocalSocket, record.LocalTCP, record.RemoteSocket = "", "", ""
+			master.BrokerAddress, master.RemoteSocket, master.LocalSocket = "", "", ""
+			fmt.Fprintf(a.Err, "warning: debugger host panes are unavailable (%v); shell/run remain usable, or set terminal.scope=remote\n", forwardErr)
+			err = nil
 		}
-	}
-	if err != nil {
-		if b != nil {
-			_ = b.Close()
-		}
-		os.RemoveAll(runtimeDir)
-		return nil, err
 	}
 	record.ControlPath = master.ControlPath
 	record.RemoteSocket = master.BrokerAddress
 	if b != nil {
 		b.Record = record
 	}
-	lease, err := workspace.AcquireLock(leasePath)
+	lease, err = workspace.AcquireLock(leasePath)
 	if err != nil {
-		master.Close()
-		if b != nil {
-			b.Close()
-		}
-		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("acquire session lease: %w", err)
 	}
 	if b != nil {
 		_, err = master.Run(ctx, "broker-ping", protocol.BrokerPing{SessionID: id, Address: record.RemoteSocket, Token: token})
 	}
 	if err != nil {
-		master.Close()
-		if b != nil {
-			b.Close()
-		}
-		os.Remove(recordPath)
-		lease.Close()
-		_ = os.Remove(leasePath)
-		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("reverse broker verification failed: %w", err)
 	}
 	// Publish the session only after its control plane is usable. This makes
 	// the atomic record a readiness boundary for `stop` and other processes,
 	// rather than exposing a half-initialized broker verification window.
 	if err := broker.SaveSession(recordPath, record); err != nil {
-		lease.Close()
-		_ = os.Remove(leasePath)
-		master.Close()
-		if b != nil {
-			b.Close()
-		}
-		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
 	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Lease: lease}, nil
@@ -505,14 +507,19 @@ func (a *App) shell(ctx context.Context) (result error) {
 	if err != nil {
 		return err
 	}
-	session, err := a.startSession(ctx, p)
+	progress := newLaunchProgress(a.Err)
+	defer progress.Stop()
+	session, err := a.startSession(ctx, p, progress)
 	if err != nil {
 		return err
 	}
 	defer func() {
+		cleanupProgress := newLaunchProgress(a.Err)
+		cleanupProgress.Stage("Saving workspace")
 		if closeErr := session.Close(context.Background()); closeErr != nil {
 			result = errors.Join(result, closeErr)
 		}
+		cleanupProgress.Stop()
 	}()
 	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, PromptHost: p.HostID, PromptPath: p.WS.Slug, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
 	encoded, err := agent.EncodeRequest(request)
@@ -521,6 +528,7 @@ func (a *App) shell(ctx context.Context) (result error) {
 	}
 	cmd := session.Master.Command(ctx, true, "shell", encoded)
 	proxy := shell.Proxy{In: a.In, Out: a.Out, Err: a.Err, Nonce: session.Nonce, Barrier: func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }}
+	progress.Stop()
 	if err := proxy.Run(ctx, cmd); ctx.Err() != nil {
 		return ctx.Err()
 	} else {
@@ -539,14 +547,19 @@ func (a *App) runCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			session, err := a.startSession(cmd.Context(), p)
+			progress := newLaunchProgress(a.Err)
+			defer progress.Stop()
+			session, err := a.startSession(cmd.Context(), p, progress)
 			if err != nil {
 				return err
 			}
 			defer func() {
+				cleanupProgress := newLaunchProgress(a.Err)
+				cleanupProgress.Stage("Saving workspace")
 				if closeErr := session.Close(context.Background()); closeErr != nil {
 					result = errors.Join(result, closeErr)
 				}
+				cleanupProgress.Stop()
 			}()
 			request := protocol.ExecRequest{Args: args, Cwd: p.WS.RemotePath, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
 			encoded, err := agent.EncodeRequest(request)
@@ -556,6 +569,7 @@ func (a *App) runCommand() *cobra.Command {
 			tty := ttyMode == "always" || ttyMode == "auto" && term.IsTerminal(int(a.In.Fd()))
 			remote := session.Master.Command(cmd.Context(), tty, "exec", encoded)
 			remote.Stdin, remote.Stdout, remote.Stderr = a.In, a.Out, a.Err
+			progress.Stop()
 			if tty && term.IsTerminal(int(a.In.Fd())) {
 				old, rawErr := term.MakeRaw(int(a.In.Fd()))
 				if rawErr != nil {
