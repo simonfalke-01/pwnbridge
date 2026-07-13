@@ -79,6 +79,13 @@ expect {
 }
 expect -re {[$#] $}
 
+send -- "printf '\\033\[?1049hALTERNATE-SCREEN-OK\\033\[?1049l'\r"
+expect {
+    -re {ALTERNATE-SCREEN-OK} {}
+    timeout { puts stderr "alternate-screen byte stream was corrupted"; exit 1 }
+}
+expect -re {[$#] $}
+
 stty rows 40 columns 120 < $spawn_out(slave,name)
 after 300
 send -- "stty size\r"

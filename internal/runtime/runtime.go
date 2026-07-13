@@ -48,6 +48,10 @@ func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (
 		return State{Kind: "container", Engine: engine, ID: name, Running: true}, nil
 	}
 	_ = exec.CommandContext(ctx, engine, "rm", "-f", name).Run()
+	imageID, err := resolveImage(ctx, engine, spec.Image)
+	if err != nil {
+		return State{}, err
+	}
 	uid, gid := currentIDs()
 	workdir := spec.Workdir
 	if workdir == "" {
@@ -69,12 +73,44 @@ func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (
 		"--cap-add", "SYS_PTRACE", "--security-opt", "seccomp=unconfined", "--network", network,
 		"-v", spec.Workspace+":/work", "-v", spec.SessionDir+":/run/pwnbridge",
 		"-v", filepath.Join(spec.SessionDir, "bin")+":/run/pwnbridge/bin:ro", "-w", workdir,
-		"-e", "HOME=/tmp/pwnbridge-home", spec.Image, "sh", "-c", "mkdir -p /tmp/pwnbridge-home && exec sleep infinity")
+		"-e", "HOME=/tmp/pwnbridge-home", imageID, "sh", "-c", "mkdir -p /tmp/pwnbridge-home && exec sleep infinity")
 	cmd := exec.CommandContext(ctx, engine, args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return State{}, fmt.Errorf("create container: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return State{Kind: "container", Engine: engine, ID: name, Running: true}, nil
+}
+
+// resolveImage converts even a convenient tag in local configuration into the
+// immutable content ID actually passed to container run. Running session
+// containers are reused before this is called, so later debugger panes do not
+// depend on a tag still existing locally.
+func resolveImage(ctx context.Context, engine, reference string) (string, error) {
+	inspect := func() (string, error) {
+		out, err := exec.CommandContext(ctx, engine, "image", "inspect", "--format", "{{.Id}}", reference).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("inspect container image %q: %w: %s", reference, err, strings.TrimSpace(string(out)))
+		}
+		id := strings.TrimSpace(string(out))
+		hex := strings.TrimPrefix(id, "sha256:")
+		if len(hex) != 64 {
+			return "", fmt.Errorf("container engine returned a non-immutable image ID %q", id)
+		}
+		for _, r := range hex {
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+				return "", fmt.Errorf("container engine returned an invalid image ID %q", id)
+			}
+		}
+		return "sha256:" + hex, nil
+	}
+	if id, err := inspect(); err == nil {
+		return id, nil
+	}
+	pull := exec.CommandContext(ctx, engine, "pull", reference)
+	if out, err := pull.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("pull container image %q: %w: %s", reference, err, strings.TrimSpace(string(out)))
+	}
+	return inspect()
 }
 
 func Command(spec protocol.RuntimeSpec, tty bool, cwd string, environment map[string]string, argv []string) (*exec.Cmd, error) {

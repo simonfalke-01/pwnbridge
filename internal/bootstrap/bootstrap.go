@@ -53,6 +53,9 @@ func Run(ctx context.Context, client transport.Client, options Options) error {
 	if probe.OS != "linux" || probe.Architecture != "amd64" {
 		return fmt.Errorf("bootstrap supports linux/amd64, got %s/%s", probe.OS, probe.Architecture)
 	}
+	if err := client.CheckRemoteForwarding(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "pwnbridge warning: debugger host-pane forwarding is unavailable: %v; shell/run and terminal.scope=remote remain usable\n", err)
+	}
 	preflight := `set -eu
 . /etc/os-release
 case "$ID" in ubuntu|debian) ;; *) printf 'unsupported-distribution:%s\n' "$ID"; exit 20 ;; esac
@@ -63,6 +66,7 @@ test "${available:-0}" -ge 1048576 || { printf 'insufficient-disk-kib:%s\n' "${a
 test "${inodes:-0}" -ge 1000 || { printf 'insufficient-inodes:%s\n' "${inodes:-0}"; exit 23; }
 printf 'preflight-ok:%s:%s:%s\n' "$ID" "$available" "$inodes"`
 	preflightCommand := exec.CommandContext(ctx, client.SSH, "-T", client.Destination, preflight)
+	preflightCommand.Env = transport.SafeSSHEnvironment()
 	if output, preflightErr := preflightCommand.CombinedOutput(); preflightErr != nil {
 		return fmt.Errorf("remote bootstrap preflight failed: %w: %s", preflightErr, strings.TrimSpace(string(output)))
 	}
@@ -73,6 +77,7 @@ printf 'preflight-ok:%s:%s:%s\n' "$ID" "$available" "$inodes"`
 		}
 		check := "missing=''; for tool in " + strings.Join(tools, " ") + "; do command -v \"$tool\" >/dev/null 2>&1 || missing=\"$missing $tool\"; done; printf '%s' \"${missing# }\""
 		command := exec.CommandContext(ctx, client.SSH, "-T", client.Destination, check)
+		command.Env = transport.SafeSSHEnvironment()
 		output, checkErr := command.CombinedOutput()
 		if checkErr != nil {
 			return fmt.Errorf("check existing remote tools: %w: %s", checkErr, strings.TrimSpace(string(output)))
@@ -91,6 +96,7 @@ printf 'preflight-ok:%s:%s:%s\n' "$ID" "$available" "$inodes"`
 	}
 	for _, command := range commands {
 		cmd := exec.CommandContext(ctx, client.SSH, "-tt", client.Destination, command)
+		cmd.Env = transport.SafeSSHEnvironment()
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("bootstrap command failed: %s: %w", command, err)

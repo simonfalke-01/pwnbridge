@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -77,6 +78,10 @@ func ReadJSONLimit(path string, maximum int64, value any) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("decode %s: trailing JSON value", path)
 	}
 	return nil
 }

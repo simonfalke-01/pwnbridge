@@ -1,10 +1,69 @@
 #!/usr/bin/env python3
 import json
+import fcntl
 import os
+import pty
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import time
+
+
+def set_size(fd, rows, columns):
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+
+
+def open_pty_pane(command, log_path):
+    manager = os.fork()
+    if manager != 0:
+        return manager
+
+    try:
+        os.setsid()
+        master, slave = pty.openpty()
+        set_size(slave, 30, 90)
+        with open(log_path, "wb", buffering=0) as log:
+            process = subprocess.Popen(command, stdin=slave, stdout=slave,
+                                       stderr=slave, close_fds=True)
+            os.close(slave)
+
+            resized = False
+            tail = b""
+            while True:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                log.write(data)
+                tail = (tail + data)[-128:]
+                if not resized and b"PWNBRIDGE-RESIZE-READY" in tail:
+                    set_size(master, 45, 120)
+                    os.killpg(os.getpgrp(), signal.SIGWINCH)
+                    # Let SSH and GDB process SIGWINCH from their normal
+                    # interactive event loops before driving the debugger.
+                    time.sleep(0.5)
+                    os.write(master, (
+                        b"refresh\n"
+                        b"shell stty size\n"
+                        b"show height\n"
+                        b"show width\n"
+                        b"tui disable\n"
+                        b"continue\n"
+                        b"quit\n"
+                    ))
+                    resized = True
+            os.close(master)
+            code = process.wait()
+    except BaseException as error:
+        with open(log_path, "ab") as log:
+            log.write(("\nPTY PROVIDER ERROR: %r\n" % (error,)).encode())
+        code = 1
+    os._exit(code)
 
 request = json.load(sys.stdin)
 operation = request.get("operation")
@@ -17,10 +76,14 @@ if operation == "open":
     log_dir = os.environ.get("PWNBRIDGE_E2E_PROVIDER_LOG", tempfile.gettempdir())
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "pane-%s.log" % value.get("request_id", "unknown"))
-    log = open(log_path, "wb")
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                               stderr=subprocess.STDOUT, start_new_session=True)
-    print(json.dumps({"provider": "custom:e2e", "id": str(process.pid), "aux": log_path}))
+    if os.environ.get("PWNBRIDGE_E2E_PTY_PROVIDER") == "1":
+        pid = open_pty_pane(command, log_path)
+    else:
+        log = open(log_path, "wb")
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        pid = process.pid
+    print(json.dumps({"provider": "custom:e2e", "id": str(pid), "aux": log_path}))
 elif operation == "inspect":
     pid = int(value["id"])
     try:

@@ -184,7 +184,9 @@ placement = "right"
 Pwnbridge starts the managed shell inside a named remote multiplexer and lets
 the injected terminal wrapper split that same remote session. This produces a
 nested multiplexer when the Mac is already in Zellij/tmux and is intentionally
-not the default.
+not the default. Each remote-tmux session uses a private tmux server/socket;
+an unrelated long-lived tmux server therefore cannot leak stale `PATH` or
+`VIRTUAL_ENV` state into the managed shell.
 
 Remote scope:
 

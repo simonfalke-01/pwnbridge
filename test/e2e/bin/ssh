@@ -1,4 +1,14 @@
 #!/bin/sh
 set -eu
 : "${PWNBRIDGE_E2E_SSH_CONFIG:?set PWNBRIDGE_E2E_SSH_CONFIG}"
+if [ "${PWNBRIDGE_E2E_DISABLE_FORWARDING:-0}" = 1 ]; then
+    previous=
+    for argument in "$@"; do
+        if [ "$previous" = -O ] && [ "$argument" = forward ]; then
+            echo "remote port forwarding administratively prohibited (E2E injection)" >&2
+            exit 1
+        fi
+        previous=$argument
+    done
+fi
 exec /usr/bin/ssh -F "$PWNBRIDGE_E2E_SSH_CONFIG" "$@"

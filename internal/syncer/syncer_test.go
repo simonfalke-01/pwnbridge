@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -53,6 +54,20 @@ func TestHealthyStatus(t *testing.T) {
 	}
 }
 
+func TestEndpointResourceProblemsBlockExecution(t *testing.T) {
+	for _, problem := range []string{"no space left on device", "permission denied"} {
+		raw := fmt.Sprintf(`[{"identifier":"sync_QPHUoxd7sGevWnZNPQVNuwGvbkHi2ON3Jhz0KCZveJG","paused":false,"status":"watching","alpha":{"connected":true,"problems":[]},"beta":{"connected":true,"transitionProblems":[{"error":%q}]}}]`, problem)
+		runner := &fakeRunner{responses: []fakeResponse{{out: raw}}}
+		report, err := (Mutagen{Runner: runner}).Status(context.Background(), "sync_QPHUoxd7sGevWnZNPQVNuwGvbkHi2ON3Jhz0KCZveJG")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if report.Healthy || !strings.Contains(strings.Join(report.Problems, " "), "transitionProblems") {
+			t.Fatalf("resource problem %q was accepted: %#v", problem, report)
+		}
+	}
+}
+
 func TestVersionGate(t *testing.T) {
 	runner := &fakeRunner{responses: []fakeResponse{{out: "0.19.0\n"}}}
 	err := (Mutagen{Runner: runner}).CheckVersion(context.Background())
@@ -76,6 +91,24 @@ func TestConflictPaths(t *testing.T) {
 	paths := ConflictPaths(raw)
 	if len(paths) != 1 || paths[0] != "solve.py" {
 		t.Fatalf("got %#v", paths)
+	}
+}
+
+func TestCommandEnvironmentDoesNotLeakLocalMuxOrBrokerState(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux")
+	t.Setenv("TMUX_PANE", "%1")
+	t.Setenv("ZELLIJ_SESSION_NAME", "local")
+	t.Setenv("PWNBRIDGE_BROKER_TOKEN", "secret")
+	t.Setenv("MUTAGEN_DATA_DIRECTORY", "/wrong")
+	environment := commandEnvironment("/private/mutagen")
+	joined := "\n" + strings.Join(environment, "\n") + "\n"
+	for _, forbidden := range []string{"\nTMUX=", "\nTMUX_PANE=", "\nZELLIJ_SESSION_NAME=", "\nPWNBRIDGE_BROKER_TOKEN="} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("unsafe environment entry survived: %s", forbidden)
+		}
+	}
+	if strings.Count(joined, "\nMUTAGEN_DATA_DIRECTORY=/private/mutagen\n") != 1 {
+		t.Fatalf("isolated Mutagen data directory is missing or duplicated: %q", joined)
 	}
 }
 

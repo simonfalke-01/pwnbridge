@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pwnbridge/pwnbridge/internal/broker"
 	"github.com/pwnbridge/pwnbridge/internal/config"
 	"github.com/pwnbridge/pwnbridge/internal/paths"
+	"github.com/pwnbridge/pwnbridge/internal/protocol"
 	"github.com/pwnbridge/pwnbridge/internal/shell"
 	"github.com/pwnbridge/pwnbridge/internal/syncer"
+	"github.com/pwnbridge/pwnbridge/internal/workspace"
 )
 
 func testApp(t *testing.T) (*App, *bytes.Buffer) {
@@ -169,18 +172,148 @@ func TestRecoveryCopyDoesNotFollowSymlinks(t *testing.T) {
 	}
 }
 
-func TestProviderSpecificTerminalLayout(t *testing.T) {
-	terminal := config.Defaults().Global.Terminal
-	terminal.Provider = "zellij"
-	terminal.Zellij.Floating = true
-	if placement, _ := terminalLayout(terminal); placement != "floating" {
-		t.Fatalf("Zellij layout = %q", placement)
+func TestConflictPathRejectsSymlinkParents(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "safe"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	terminal = config.Defaults().Global.Terminal
-	terminal.Provider = "tmux"
-	terminal.Tmux.Direction = "vertical"
-	terminal.Tmux.Size = "35%"
-	if placement, size := terminalLayout(terminal); placement != "down" || size != "35%" {
-		t.Fatalf("tmux layout = %q %q", placement, size)
+	if err := rejectSymlinkParents(root, filepath.Join("safe", "file")); err != nil {
+		t.Fatal(err)
 	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectSymlinkParents(root, filepath.Join("link", "file")); err == nil {
+		t.Fatal("conflict path traversed a symbolic-link parent")
+	}
+	check := remoteSymlinkParentCheck("~/.local/share/pwnbridge/workspaces/id/root", "dir/a b/file")
+	for _, wanted := range []string{`"$HOME"/'.local/share/pwnbridge/workspaces/id/root'`, `root/dir/a b'`} {
+		if !strings.Contains(check, wanted) {
+			t.Fatalf("remote parent check is missing %q: %s", wanted, check)
+		}
+	}
+}
+
+func TestBrokerlessSessionUsesOwnerLeaseAndOmitsCredentials(t *testing.T) {
+	app, _ := testApp(t)
+	localWorkspace := t.TempDir()
+	recordPath := filepath.Join(app.Paths.State, "sessions", "0123456789abcdef.json")
+	record := broker.SessionRecord{
+		OwnerPID: os.Getpid(), ID: "0123456789abcdef",
+		Token:          "0123456789abcdef0123456789abcdef",
+		LocalWorkspace: localWorkspace, RecordPath: recordPath, LeasePath: recordPath + ".lease",
+		RemoteSessionDir: "/remote/session",
+		Runtime:          protocol.RuntimeSpec{Kind: "host", Workspace: "/remote/work", SessionDir: "/remote/session"},
+	}
+	lease, err := workspace.AcquireLock(record.LeasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.SaveSession(recordPath, record); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := app.liveSessions(localWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != record.ID {
+		t.Fatalf("brokerless session was not retained: %#v", sessions)
+	}
+
+	effective := config.Defaults()
+	effective.Global.Terminal.Scope = "remote"
+	session := activeSession{Token: record.Token, Record: record, project: &projectContext{Config: effective}}
+	environment := session.environment()
+	for key := range environment {
+		if strings.HasPrefix(key, "PWNBRIDGE_") {
+			t.Fatalf("internal terminal state leaked into command environment: %s", key)
+		}
+	}
+	terminal := session.terminalSpec()
+	if terminal.Broker != "" || terminal.Token != "" || terminal.Scope != "remote" {
+		t.Fatalf("brokerless terminal state is invalid: %#v", terminal)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err = app.liveSessions(localWorkspace)
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("unlocked stale session survived PID reuse guard: sessions=%#v err=%v", sessions, err)
+	}
+}
+
+func TestHostUseRecoversFromStaleProjectBinding(t *testing.T) {
+	app, _ := testApp(t)
+	root := t.TempDir()
+	root, _ = filepath.EvalSymlinks(root)
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	effective := config.Defaults()
+	effective.Global.DefaultHost = "good"
+	effective.Global.Hosts["good"] = config.Host{
+		Destination: "pwnbox", Platform: "linux/amd64",
+		WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn",
+	}
+	if err := config.SaveGlobal(filepath.Join(app.Paths.Config, "config.toml"), effective.Global); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Paths: app.Paths}
+	if err := manager.SetBinding(root, "removed-host"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "host", "use", "good"); err != nil {
+		t.Fatalf("host use could not recover stale binding: %v", err)
+	}
+	if bound, err := manager.Binding(root); err != nil || bound != "good" {
+		t.Fatalf("binding = %q, err=%v", bound, err)
+	}
+}
+
+func TestIgnoreParsingIsBoundedAndDoesNotImportGitignore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".gitignore"), []byte("never-import-this\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".pwnbridgeignore"), []byte("# comment\n recordings/ \n*.bak\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patterns, err := projectIgnores(root, []string{"configured/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(patterns, "|")
+	if got != "configured/|recordings/|*.bak" || strings.Contains(got, "never-import") {
+		t.Fatalf("patterns = %q", got)
+	}
+	if _, err := parseIgnores([]byte{'a', 0, 'b'}, nil); err == nil {
+		t.Fatal("NUL ignore pattern was accepted")
+	}
+	if _, err := parseIgnores([]byte(strings.Repeat("a", 4097)), nil); err == nil {
+		t.Fatal("oversized ignore pattern was accepted")
+	}
+}
+
+func FuzzIgnoreParser(f *testing.F) {
+	f.Add([]byte("# comment\ncore*\nrecordings/\n"))
+	f.Add([]byte{'a', 0, 'b'})
+	f.Fuzz(func(t *testing.T, data []byte) {
+		patterns, err := parseIgnores(data, []string{"configured/"})
+		if err != nil {
+			return
+		}
+		if len(patterns) > 4096 {
+			t.Fatalf("unbounded result: %d", len(patterns))
+		}
+		for _, pattern := range patterns {
+			if pattern == "" || len(pattern) > 4096 || strings.IndexByte(pattern, 0) >= 0 {
+				t.Fatalf("invalid accepted pattern %q", pattern)
+			}
+		}
+	})
 }

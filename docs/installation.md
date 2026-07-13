@@ -139,6 +139,12 @@ pwnbridge host bootstrap x86 --dry-run
 pwnbridge host bootstrap x86
 ```
 
+The host name is a small local identifier (ASCII letters, digits, `.`, `_`, and
+`-`); the destination remains your normal OpenSSH alias. Doctor verifies the
+remote platform, toolchain, disk/inodes, ptrace, pinned pwntools environment,
+reverse forwarding, and the configured container engine. Forwarding failure
+does not prevent ordinary shell/run or `terminal.scope = "remote"` operation.
+
 The profile installs standard build/debug packages, creates
 `~/.local/share/pwnbridge/envs/pwn-v1`, and enforces pwntools 4.15.0. The static
 agent is deployed even when `--no-sudo` is used. Optional Pwndbg is pinned and

@@ -67,7 +67,7 @@ esac
 	t.Setenv("ZELLIJ", "0")
 	t.Setenv("ZELLIJ_SESSION_NAME", "")
 	p := Zellij{}
-	base := Spec{Cwd: "/tmp/work space", Title: "debug", Size: "50%", Focus: true, CloseOnSuccess: true, Command: []string{"printf", "a b"}}
+	base := Spec{Cwd: "/tmp/work space", Title: "debug", Size: "50%", Focus: true, CloseOnSuccess: true, NearCurrentPane: true, Command: []string{"printf", "a b"}}
 	for _, placement := range []string{"right", "down", "floating"} {
 		spec := base
 		spec.Placement = placement
@@ -99,7 +99,7 @@ esac
 		t.Fatal(err)
 	}
 	log := string(logData)
-	for _, wanted := range []string{"<--direction><right>", "<--direction><down>", "<--floating>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
+	for _, wanted := range []string{"<--near-current-pane><--direction><right>", "<--direction><down>", "<--floating>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
 		if !strings.Contains(log, wanted) {
 			t.Fatalf("missing %q in Zellij calls:\n%s", wanted, log)
 		}

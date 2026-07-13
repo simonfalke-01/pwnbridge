@@ -38,12 +38,22 @@ func Local(ctx context.Context, mutagen syncer.Mutagen) []Check {
 	return append(checks, check)
 }
 
-func Remote(ctx context.Context, client transport.Client) []Check {
+func Remote(ctx context.Context, client transport.Client, containerEngine string, requireForwarding bool) []Check {
 	probe, err := client.BasicProbe(ctx)
 	if err != nil {
 		return []Check{{Name: "ssh", OK: false, Detail: err.Error(), Remediation: "verify destination, key authentication, and host key"}}
 	}
-	checks := []Check{{Name: "ssh", OK: true, Detail: client.Destination}, {Name: "remote-platform", OK: probe.OS == "linux" && probe.Architecture == "amd64", Detail: probe.OS + "/" + probe.Architecture}}
+	forwardErr := client.CheckRemoteForwarding(ctx)
+	forwardOK := forwardErr == nil || !requireForwarding
+	forwardDetail := detail(forwardErr, "loopback reverse TCP forwarding available")
+	if forwardErr != nil && !requireForwarding {
+		forwardDetail = "unavailable; terminal.scope=remote does not require it"
+	}
+	checks := []Check{
+		{Name: "ssh", OK: true, Detail: client.Destination},
+		{Name: "ssh-reverse-forwarding", OK: forwardOK, Detail: forwardDetail, Remediation: "enable AllowTcpForwarding for this SSH account, or configure terminal.scope=remote"},
+		{Name: "remote-platform", OK: probe.OS == "linux" && probe.Architecture == "amd64", Detail: probe.OS + "/" + probe.Architecture},
+	}
 	if client.AgentPath != "" {
 		agentProbe, agentErr := client.ProbeAgent(ctx)
 		checks = append(checks, Check{Name: "agent", OK: agentErr == nil, Detail: detail(agentErr, agentProbe.Version)})
@@ -57,9 +67,18 @@ func Remote(ctx context.Context, client transport.Client) []Check {
 				Check{Name: "remote-ptrace", OK: agentProbe.PtraceScope != "3", Detail: "yama.ptrace_scope=" + agentProbe.PtraceScope, Remediation: "allow same-user debugging or use the container runtime"},
 				Check{Name: "remote-pwntools", OK: agentProbe.PwntoolsVersion == "4.15.0", Detail: "version=" + agentProbe.PwntoolsVersion, Remediation: "run pwnbridge host bootstrap"},
 			)
-			for _, required := range []string{"bash", "gdb", "gdbserver", "python3", "file", "patchelf", "checksec", "tmux", "socat"} {
+			for _, required := range []string{"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch", "patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc"} {
 				ok := agentProbe.Tools[required]
 				checks = append(checks, Check{Name: "remote-" + required, OK: ok, Detail: fmt.Sprintf("available=%t", ok), Remediation: "run pwnbridge host bootstrap"})
+			}
+			if containerEngine != "" {
+				ok := agentProbe.Tools[containerEngine]
+				detailText := containerEngine
+				if containerEngine == "auto" {
+					ok = agentProbe.Tools["podman"] || agentProbe.Tools["docker"]
+					detailText = "podman or docker"
+				}
+				checks = append(checks, Check{Name: "remote-container-engine", OK: ok, Detail: detailText, Remediation: "install the configured rootless container engine"})
 			}
 		}
 	}

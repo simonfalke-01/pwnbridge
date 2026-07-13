@@ -73,6 +73,7 @@ func TestPodmanEnsureUsesIsolationAndOwnedMounts(t *testing.T) {
 	script := `#!/bin/sh
 printf '%s\n' "$*" >> "$PWNBRIDGE_RUNTIME_TEST_LOG"
 case "$1" in
+	image) printf 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; exit 0 ;;
   inspect) exit 1 ;;
   rm) exit 0 ;;
   run) printf container-id; exit 0 ;;
@@ -104,9 +105,83 @@ exit 1
 		t.Fatal(err)
 	}
 	call := string(data)
-	for _, wanted := range []string{"--userns keep-id", "--cap-add SYS_PTRACE", "seccomp=unconfined", "--network bridge", "pwnbridge.workspace=workspace123", session + "/bin:/run/pwnbridge/bin:ro"} {
+	for _, wanted := range []string{"image inspect --format {{.Id}} image@sha256:abcd", "--userns keep-id", "--cap-add SYS_PTRACE", "seccomp=unconfined", "--network bridge", "pwnbridge.workspace=workspace123", session + "/bin:/run/pwnbridge/bin:ro", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"} {
 		if !strings.Contains(call, wanted) {
 			t.Fatalf("missing %q in runtime argv:\n%s", wanted, call)
 		}
+	}
+}
+
+func TestEnsureReusesRunningContainerWithoutResolvingTag(t *testing.T) {
+	dir := t.TempDir()
+	engine := filepath.Join(dir, "docker")
+	logPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$PWNBRIDGE_RUNTIME_TEST_LOG"
+case "$1" in
+  inspect) printf true; exit 0 ;;
+  image|pull|run) exit 99 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(engine, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PWNBRIDGE_RUNTIME_TEST_LOG", logPath)
+	spec := protocol.RuntimeSpec{
+		Kind: "container", Engine: "docker", Image: "image:tag", ID: "pwnbridge-session123",
+		Workspace: filepath.Join(dir, "workspace"), WorkspaceID: "workspace123", SessionDir: filepath.Join(dir, "session"),
+	}
+	state, err := Ensure(context.Background(), &spec, "session123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Running || state.ID != spec.ID {
+		t.Fatalf("unexpected state: %#v", state)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "image inspect") || strings.Contains(string(data), "pull ") {
+		t.Fatalf("running container still depended on configured tag:\n%s", data)
+	}
+}
+
+func TestResolveImagePullsAndRejectsMutableEngineOutput(t *testing.T) {
+	dir := t.TempDir()
+	engine := filepath.Join(dir, "docker")
+	count := filepath.Join(dir, "count")
+	script := `#!/bin/sh
+case "$1 $2" in
+  "image inspect")
+    if test -e "$PWNBRIDGE_RUNTIME_COUNT"; then
+      printf 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      exit 0
+    fi
+    exit 1 ;;
+  "pull image:tag") touch "$PWNBRIDGE_RUNTIME_COUNT"; exit 0 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(engine, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_RUNTIME_COUNT", count)
+	id, err := resolveImage(context.Background(), engine, "image:tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "sha256:"+strings.Repeat("b", 64) {
+		t.Fatalf("resolved ID = %q", id)
+	}
+
+	bad := filepath.Join(dir, "bad-engine")
+	if err := os.WriteFile(bad, []byte("#!/bin/sh\nprintf mutable-tag\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveImage(context.Background(), bad, "image:tag"); err == nil {
+		t.Fatal("mutable engine output was accepted as an image ID")
 	}
 }

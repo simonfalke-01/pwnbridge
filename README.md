@@ -108,6 +108,8 @@ pwnbridge doctor
 `host bootstrap` prints its package plan before invoking sudo. It is
 idempotent, installs a user-owned pwntools 4.15 environment, supports
 `--dry-run`, and can validate an already-prepared host with `--no-sudo`.
+It also checks reverse forwarding; if the server forbids it, ordinary shell/run
+still work and remote tmux/Zellij scope remains available.
 
 No per-challenge config is required. From any challenge directory:
 

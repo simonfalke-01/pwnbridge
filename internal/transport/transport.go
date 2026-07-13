@@ -60,17 +60,61 @@ func New(destination, agentPath string) Client {
 }
 
 func (c Client) BasicProbe(ctx context.Context) (HostProbe, error) {
-	command := `printf '%s\n' "$HOME"; uname -s; uname -m`
+	command := `printf '__PWNBRIDGE_HOME__%s\n' "$HOME"; printf '__PWNBRIDGE_OS__'; uname -s; printf '__PWNBRIDGE_ARCH__'; uname -m`
 	out, err := c.run(ctx, "-T", c.Destination, command)
 	if err != nil {
 		return HostProbe{}, err
 	}
+	return parseBasicProbe(out)
+}
+
+func parseBasicProbe(out []byte) (HostProbe, error) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	var probe HostProbe
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "__PWNBRIDGE_HOME__"):
+			probe.Home = strings.TrimPrefix(line, "__PWNBRIDGE_HOME__")
+		case strings.HasPrefix(line, "__PWNBRIDGE_OS__"):
+			probe.OS = strings.ToLower(strings.TrimPrefix(line, "__PWNBRIDGE_OS__"))
+		case strings.HasPrefix(line, "__PWNBRIDGE_ARCH__"):
+			probe.Architecture = normalizeArchitecture(strings.TrimPrefix(line, "__PWNBRIDGE_ARCH__"))
+		}
+	}
+	if probe.Home != "" && probe.OS != "" && probe.Architecture != "" {
+		return probe, nil
+	}
+	// Compatibility with fake transports and older captured probe output.
 	if len(lines) < 3 {
 		return HostProbe{}, fmt.Errorf("unexpected SSH probe output: %q", out)
 	}
-	probe := HostProbe{Home: lines[0], OS: strings.ToLower(lines[1]), Architecture: normalizeArchitecture(lines[2])}
-	return probe, nil
+	return HostProbe{Home: lines[0], OS: strings.ToLower(lines[1]), Architecture: normalizeArchitecture(lines[2])}, nil
+}
+
+// CheckRemoteForwarding verifies the least-capable reverse-forwarding path
+// used by the debugger broker. It deliberately creates a private control
+// master first: ClearAllForwardings on that master removes configured forwards,
+// then the control operation below tests a newly added forward without reusing
+// or mutating any user-owned multiplexed SSH connection.
+func (c Client) CheckRemoteForwarding(ctx context.Context) error {
+	runtimeDir, err := os.MkdirTemp("", "pb-forward-check-")
+	if err != nil {
+		return fmt.Errorf("create forwarding probe directory: %w", err)
+	}
+	defer os.RemoveAll(runtimeDir)
+	master, err := c.StartControlMaster(ctx, runtimeDir)
+	if err != nil {
+		return fmt.Errorf("start forwarding probe: %w", err)
+	}
+	defer master.Close()
+	cmd := c.sshCommand(ctx, "-S", master.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:127.0.0.1:9", c.Destination)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("reverse SSH forwarding is unavailable: %w: %s", err, strings.TrimSpace(string(out)))
+	} else if port, parseErr := strconv.Atoi(strings.TrimSpace(string(out))); parseErr != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("SSH did not report an allocated reverse port: %q", strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func (c Client) ProbeAgent(ctx context.Context) (HostProbe, error) {
@@ -129,6 +173,7 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 	}()
 	target := c.Destination + ":" + tmp
 	cmd := exec.CommandContext(ctx, c.SCP, "-q", "--", localPath, target)
+	cmd.Env = SafeSSHEnvironment()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("upload agent: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -161,6 +206,25 @@ done`
 }
 
 func (c Client) StartMaster(ctx context.Context, runtimeDir, localBroker, remoteBroker, localTCP string) (*Master, error) {
+	master, err := c.StartControlMaster(ctx, runtimeDir)
+	if err != nil {
+		return nil, err
+	}
+	master.RemoteSocket, master.LocalSocket = remoteBroker, localBroker
+	if localBroker == "" || remoteBroker == "" {
+		return master, nil
+	}
+	if err := master.addBrokerForward(ctx, localTCP); err != nil {
+		_ = master.Close()
+		return nil, err
+	}
+	return master, nil
+}
+
+// StartControlMaster establishes only the private SSH control plane. It is
+// intentionally useful without reverse forwarding so ordinary shell/run
+// workflows keep working on sshd configurations that disallow forwarding.
+func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Master, error) {
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -175,13 +239,14 @@ func (c Client) StartMaster(ctx context.Context, runtimeDir, localBroker, remote
 	// enough for the session defer to stop containers, flush artifacts, and
 	// cancel forwards. It is terminated explicitly by Master.Close.
 	cmd := exec.Command(c.SSH, args...)
+	cmd.Env = SafeSSHEnvironment()
 	cmd.Stdin = nil
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	master := &Master{Client: c, ControlPath: control, RemoteSocket: remoteBroker, LocalSocket: localBroker, process: cmd, done: make(chan error, 1)}
+	master := &Master{Client: c, ControlPath: control, process: cmd, done: make(chan error, 1)}
 	go func() { master.done <- cmd.Wait() }()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -190,54 +255,8 @@ func (c Client) StartMaster(ctx context.Context, runtimeDir, localBroker, remote
 			return nil, fmt.Errorf("SSH control master exited during startup: %w", processErr)
 		default:
 		}
-		check := exec.CommandContext(ctx, c.SSH, "-S", control, "-O", "check", c.Destination)
+		check := c.sshCommand(ctx, "-S", control, "-O", "check", c.Destination)
 		if err := check.Run(); err == nil {
-			if localBroker != "" && remoteBroker != "" {
-				forward := exec.CommandContext(ctx, c.SSH, "-S", control, "-O", "forward", "-R", remoteBroker+":"+localBroker, c.Destination)
-				if output, forwardErr := forward.CombinedOutput(); forwardErr != nil {
-					if localTCP == "" {
-						_ = master.Close()
-						return nil, fmt.Errorf("create reverse stream-local forward: %w: %s", forwardErr, strings.TrimSpace(string(output)))
-					}
-					host, port, splitErr := net.SplitHostPort(localTCP)
-					if splitErr != nil {
-						_ = master.Close()
-						return nil, splitErr
-					}
-					fallback := exec.CommandContext(ctx, c.SSH, "-S", control, "-O", "forward", "-R", "127.0.0.1:0:"+host+":"+port, c.Destination)
-					fallbackOut, fallbackErr := fallback.CombinedOutput()
-					if fallbackErr != nil {
-						_ = master.Close()
-						return nil, fmt.Errorf("reverse forwarding unavailable (stream-local: %v; TCP: %w: %s)", forwardErr, fallbackErr, strings.TrimSpace(string(fallbackOut)))
-					}
-					allocated := strings.TrimSpace(string(fallbackOut))
-					if _, parseErr := strconv.Atoi(allocated); parseErr != nil {
-						_ = master.Close()
-						return nil, fmt.Errorf("SSH did not report allocated reverse port: %q", allocated)
-					}
-					master.BrokerAddress = "tcp:127.0.0.1:" + allocated
-					// A container with bridge networking cannot reach a listener bound
-					// to the host's loopback.  When socat is available (it is part of
-					// the pwn bootstrap), expose the TCP fallback as the same private
-					// Unix socket used by the normal stream-local path.  Direct-host
-					// execution still retains the loopback TCP fallback if socat is
-					// absent.
-					relayPID := remoteBroker + ".relay.pid"
-					relayScript := "umask 077; command -v socat >/dev/null 2>&1 || exit 0; " +
-						"rm -f -- " + shellQuote(remoteBroker) + " " + shellQuote(relayPID) + "; " +
-						"nohup socat UNIX-LISTEN:" + shellQuote(remoteBroker) + ",fork,mode=600 TCP:127.0.0.1:" + allocated +
-						" </dev/null >/dev/null 2>&1 & pid=$!; printf '%s' \"$pid\" > " + shellQuote(relayPID) + "; " +
-						"i=0; while [ \"$i\" -lt 100 ]; do test -S " + shellQuote(remoteBroker) + " && { printf relay; exit 0; }; " +
-						"kill -0 \"$pid\" 2>/dev/null || exit 1; i=$((i+1)); sleep 0.02; done; exit 1"
-					relay := exec.CommandContext(ctx, c.SSH, "-S", control, "-T", c.Destination, relayScript)
-					if relayOut, relayErr := relay.CombinedOutput(); relayErr == nil && strings.TrimSpace(string(relayOut)) == "relay" {
-						master.BrokerAddress = "unix:" + remoteBroker
-						master.RelayPIDFile = relayPID
-					}
-				} else {
-					master.BrokerAddress = "unix:" + remoteBroker
-				}
-			}
 			return master, nil
 		}
 		select {
@@ -251,6 +270,47 @@ func (c Client) StartMaster(ctx context.Context, runtimeDir, localBroker, remote
 	return nil, errors.New("SSH control master did not become ready")
 }
 
+func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
+	forward := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-O", "forward", "-R", m.RemoteSocket+":"+m.LocalSocket, m.Client.Destination)
+	if output, forwardErr := forward.CombinedOutput(); forwardErr != nil {
+		if localTCP == "" {
+			return fmt.Errorf("create reverse stream-local forward: %w: %s", forwardErr, strings.TrimSpace(string(output)))
+		}
+		host, port, splitErr := net.SplitHostPort(localTCP)
+		if splitErr != nil {
+			return splitErr
+		}
+		fallback := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:"+host+":"+port, m.Client.Destination)
+		fallbackOut, fallbackErr := fallback.CombinedOutput()
+		if fallbackErr != nil {
+			return fmt.Errorf("reverse forwarding unavailable (stream-local: %v; TCP: %w: %s)", forwardErr, fallbackErr, strings.TrimSpace(string(fallbackOut)))
+		}
+		allocated := strings.TrimSpace(string(fallbackOut))
+		portNumber, parseErr := strconv.Atoi(allocated)
+		if parseErr != nil || portNumber < 1 || portNumber > 65535 {
+			return fmt.Errorf("SSH did not report allocated reverse port: %q", allocated)
+		}
+		m.BrokerAddress = "tcp:127.0.0.1:" + allocated
+		// A bridge-networked container cannot reach a host loopback listener.
+		// When socat is available, restore the private Unix-socket endpoint.
+		relayPID := m.RemoteSocket + ".relay.pid"
+		relayScript := "umask 077; command -v socat >/dev/null 2>&1 || exit 0; " +
+			"rm -f -- " + shellQuote(m.RemoteSocket) + " " + shellQuote(relayPID) + "; " +
+			"nohup socat UNIX-LISTEN:" + shellQuote(m.RemoteSocket) + ",fork,mode=600 TCP:127.0.0.1:" + allocated +
+			" </dev/null >/dev/null 2>&1 & pid=$!; printf '%s' \"$pid\" > " + shellQuote(relayPID) + "; " +
+			"i=0; while [ \"$i\" -lt 100 ]; do test -S " + shellQuote(m.RemoteSocket) + " && { printf relay; exit 0; }; " +
+			"kill -0 \"$pid\" 2>/dev/null || exit 1; i=$((i+1)); sleep 0.02; done; exit 1"
+		relay := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-T", m.Client.Destination, relayScript)
+		if relayOut, relayErr := relay.CombinedOutput(); relayErr == nil && strings.TrimSpace(string(relayOut)) == "relay" {
+			m.BrokerAddress = "unix:" + m.RemoteSocket
+			m.RelayPIDFile = relayPID
+		}
+	} else {
+		m.BrokerAddress = "unix:" + m.RemoteSocket
+	}
+	return nil
+}
+
 func (m *Master) Command(ctx context.Context, tty bool, operation, encoded string) *exec.Cmd {
 	args := []string{"-S", m.ControlPath}
 	if tty {
@@ -259,7 +319,7 @@ func (m *Master) Command(ctx context.Context, tty bool, operation, encoded strin
 		args = append(args, "-T")
 	}
 	args = append(args, m.Client.Destination, remoteAgentCommand(m.Client.AgentPath, operation, encoded))
-	return exec.CommandContext(ctx, m.Client.SSH, args...)
+	return m.Client.sshCommand(ctx, args...)
 }
 
 func (m *Master) Run(ctx context.Context, operation string, request any) ([]byte, error) {
@@ -284,9 +344,13 @@ func (m *Master) Close() error {
 			script := "pid=''; test ! -f " + shellQuote(m.RelayPIDFile) + " || pid=$(cat " + shellQuote(m.RelayPIDFile) + "); " +
 				"case \"$pid\" in ''|*[!0-9]*) ;; *) kill \"$pid\" 2>/dev/null || true ;; esac; " +
 				"rm -f -- " + shellQuote(m.RelayPIDFile) + " " + shellQuote(m.RemoteSocket)
-			_ = exec.Command(m.Client.SSH, "-S", m.ControlPath, "-T", m.Client.Destination, script).Run()
+			cmd := exec.Command(m.Client.SSH, "-S", m.ControlPath, "-T", m.Client.Destination, script)
+			cmd.Env = SafeSSHEnvironment()
+			_ = cmd.Run()
 		}
-		_ = exec.Command(m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination).Run()
+		exit := exec.Command(m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination)
+		exit.Env = SafeSSHEnvironment()
+		_ = exit.Run()
 	}
 	if m.process != nil {
 		if m.process.Process != nil {
@@ -306,12 +370,51 @@ func (m *Master) Close() error {
 }
 
 func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.SSH, args...)
+	cmd := c.sshCommand(ctx, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("ssh: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func (c Client) sshCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, c.SSH, args...)
+	cmd.Env = SafeSSHEnvironment()
+	return cmd
+}
+
+// SafeSSHEnvironment keeps authentication/configuration environment available
+// to the system OpenSSH client while ensuring host multiplexer state and
+// session broker capabilities cannot be sent by an unusually broad SendEnv.
+// It also gives PTY channels a useful terminal type when launched from a
+// non-interactive parent (for example, a custom terminal provider).
+func SafeSSHEnvironment() []string {
+	result := make([]string, 0, len(os.Environ())+1)
+	hasTERM := false
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if key == "TMUX" || strings.HasPrefix(key, "TMUX_") || key == "ZELLIJ" || strings.HasPrefix(key, "ZELLIJ_") {
+			continue
+		}
+		switch key {
+		case "PWNBRIDGE_BROKER", "PWNBRIDGE_BROKER_TOKEN", "PWNBRIDGE_SESSION_ID", "PWNBRIDGE_SESSION_DIR", "PWNBRIDGE_RUNTIME", "PWNBRIDGE_TERMINAL_SCOPE", "PWNBRIDGE_TERMINAL_PROVIDER", "PWNBRIDGE_TERMINAL_PLACEMENT":
+			continue
+		case "TERM":
+			hasTERM = true
+			if value == "" || value == "dumb" {
+				entry = "TERM=xterm-256color"
+			}
+		}
+		result = append(result, entry)
+	}
+	if !hasTERM {
+		result = append(result, "TERM=xterm-256color")
+	}
+	return result
 }
 
 func remoteAgentCommand(path, operation, encoded string) string {

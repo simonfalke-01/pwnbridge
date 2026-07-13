@@ -103,6 +103,10 @@ pwnbridge host remove NAME
 `host use` stores a local project-to-host binding under XDG state; it does not
 put a machine name into the project checkout.
 
+`workspace_root` accepts a safe path below the remote home (the portable
+default) or an absolute server-local path such as `/srv/pwnbridge/workspaces`.
+Pwnbridge always appends its installation and workspace identity beneath it.
+
 ### Synchronization
 
 The supported engine/mode/watch combination is intentionally fixed:
@@ -146,9 +150,11 @@ Global `[runtime]` and `[runtime.container]` values are the base layer for every
 project. A project may override individual container fields without repeating
 them all.
 
-Container `engine` is `auto`, `docker`, or `podman`; `image` is a tag or,
-preferably, digest reference; `workdir` must be absolute; and `network` is a
-single Docker/Podman network-mode argument. Values beginning with a dash,
+Container `engine` is `auto`, `docker`, or `podman`; `image` is preferably a
+digest reference; `workdir` is `/work` or a directory beneath it; and `network`
+is one Docker/Podman network-mode argument. At container creation, a configured
+tag is resolved to the engine's immutable 64-hex-character SHA-256 image ID;
+later debugger panes reuse that session container. Values beginning with a dash,
 containing whitespace/control characters, or exceeding bounds are rejected.
 
 ## Project configuration
@@ -272,9 +278,9 @@ Standard absolute `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, and
 `XDG_CACHE_HOME` values relocate their corresponding Pwnbridge directories.
 Relative XDG values are ignored in favor of platform fallbacks.
 
-Internal `PWNBRIDGE_BROKER*`, `PWNBRIDGE_SESSION*`, and `PWNBRIDGE_RUNTIME`
-values visible inside a managed process are session protocol data, not public
-configuration knobs.
+The `PWNBRIDGE_` prefix is reserved. Broker/session credentials are kept in a
+private per-session `terminal.json` beside the injected wrapper and are not
+exported into the managed command environment.
 
 ## Portable configuration rules
 

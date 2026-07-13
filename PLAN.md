@@ -1,6 +1,6 @@
 # pwnbridge — Comprehensive Project Plan
 
-**Status:** Approved design; implementation in progress
+**Status:** Implemented and acceptance-tested
 **Last updated:** 2026-07-13
 **Canonical project name:** `pwnbridge`
 
@@ -715,6 +715,7 @@ These are dependency-ordered parts of one complete target.
 - [Go fuzzing](https://go.dev/doc/security/fuzz/)
 - [creack/pty](https://github.com/creack/pty)
 - [GoReleaser](https://goreleaser.com/getting-started/intro/)
+- [GoReleaser reproducible builds](https://goreleaser.com/blog/reproducible-builds/)
 - [Homebrew tap trust](https://docs.brew.sh/Tap-Trust)
 - [Apple Rosetta Linux alternative](https://developer.apple.com/documentation/virtualization/running-intel-binaries-in-linux-vms-with-rosetta)
 - [SSHFS maintenance](https://github.com/libfuse/sshfs)
@@ -735,3 +736,32 @@ These are dependency-ordered parts of one complete target.
 - Sync is `two-way-safe`; portable symlinks are the default.
 - No public daemon, agent forwarding, silent conflict resolution, automatic reset, or automatic deletion.
 - Terminal providers, pwntools broker, host runtime, and container runtime all belong to the complete target.
+
+## 18. Implementation completion record
+
+The complete target described by this plan is implemented. There is no
+deferred reduced-product phase: host execution, the optional container
+runtime, synchronization safety, the PTY shell, debugger broker, host and
+remote multiplexers, packaging, and operator documentation ship together.
+
+Acceptance was completed on 2026-07-13 from an Apple Silicon macOS host against
+a real Ubuntu amd64 Lima guest. The same production OpenSSH, Mutagen, uploaded
+agent, broker, and runtime paths used by the CLI were exercised.
+
+| Area | Acceptance evidence |
+|---|---|
+| Go implementation | `go test ./...`, `go vet ./...`, cross-builds, and `go test -race ./...` pass; native fuzz targets cover strict TOML, framed protocol, shell markers, Mutagen health JSON, ignore parsing, and workspace slugs |
+| Synchronization | Real two-way-safe initial sync, save-before-run barriers, executable bits, portable symlinks, Unicode, remote deletion, endpoint permission failure/recovery, conflicts (including spaces), explicit resolution backups, and remote-root deletion protection pass |
+| PTY lifecycle | Readline, bracketed paste, Ctrl-C/Z/D, job control, alternate-screen bytes, resize, prompt barriers, disconnect restoration, reconnect, and artifact return pass in real PTYs |
+| Pwntools/GDB | pwntools 4.15.0 and pinned 5-dev exercise `gdb.debug()`, process attach, `api=True`, and concurrent debuggers; Pwndbg 2026.02.18 and GDB TUI/resize pass |
+| Terminal integration | Zellij 0.44.3 and tmux 3.6a host panes pass; custom-provider PTYs and explicit remote tmux pass; remote tmux remains correct in the presence of a stale unrelated tmux server because each managed session has a private server/socket |
+| Runtime coverage | Direct Ubuntu amd64 and Podman container execution pass; solve process, gdbserver, GDB, wrapper, and API bridge remain in the intended runtime namespace |
+| Degradation and recovery | Reverse-forwarding denial degrades ordinary shell/run cleanly and retains explicit remote-multiplexer GDB; live SSH-master termination restores the host terminal and preserves/reconciles data; `pwnbridge stop` terminates leased sessions safely |
+| Security and quality | `gosec` passes under the documented deliberate exclusions; `govulncheck` reports no reachable vulnerabilities; ShellCheck, actionlint, workflow YAML parsing, Python syntax, Ruby syntax, and Homebrew style pass |
+| Distribution | GoReleaser emits Darwin arm64/amd64 clients plus a static Linux amd64 agent, documentation, completions, checksums, and SPDX 2.3 SBOMs; checksums verify and two tag-context builds produce byte-identical archives |
+
+The CI and release workflows repeat the deterministic gates, publish draft
+tag releases, attach checksum-based GitHub attestations, and publish the
+optional amd64 container with provenance and SBOM metadata. Future work is
+normal maintenance and compatibility expansion, not unfinished scope from
+this plan.

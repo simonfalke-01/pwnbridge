@@ -70,9 +70,10 @@ fallback binds only remote `127.0.0.1` and local `127.0.0.1`; a private Unix
 relay is used for bridge containers when available. Pwnbridge performs an
 authenticated end-to-end ping before exposing a managed process.
 
-A same-UID remote process can inspect the environment or other same-user state
-on many Linux systems. Tokens are therefore not presented as isolation from a
-compromised remote Unix account. The local-command invariant limits what a
+A same-UID remote process can inspect other same-user state on many Linux
+systems. Broker credentials are omitted from the command environment and kept
+in a mode-0600 per-session file, but tokens are not presented as isolation from
+a compromised remote Unix account. The local-command invariant limits what a
 forged valid broker request can cause on macOS.
 
 ## SSH posture

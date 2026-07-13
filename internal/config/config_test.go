@@ -123,6 +123,22 @@ func TestRejectsUnsafeExecutionConfiguration(t *testing.T) {
 		}},
 		{"unsafe provider", func(e *Effective) { e.Global.Terminal.Provider = "custom:../../bad" }},
 		{"invalid tty layout", func(e *Effective) { e.Global.Terminal.Placement = "diagonal" }},
+		{"container workdir outside mount", func(e *Effective) {
+			e.Project.Runtime.Kind = "container"
+			e.Project.Runtime.Container.Image = "image@sha256:abcd"
+			e.Project.Runtime.Container.Workdir = "/tmp"
+		}},
+		{"container workdir traversal", func(e *Effective) {
+			e.Project.Runtime.Kind = "container"
+			e.Project.Runtime.Container.Image = "image@sha256:abcd"
+			e.Project.Runtime.Container.Workdir = "/work/../../etc"
+		}},
+		{"remote workspace escape", func(e *Effective) {
+			e.Global.Hosts["x"] = Host{Destination: "pwnbox", Platform: "linux/amd64", WorkspaceRoot: "~/../escape", BootstrapProfile: "pwn"}
+		}},
+		{"unknown bootstrap profile", func(e *Effective) {
+			e.Global.Hosts["x"] = Host{Destination: "pwnbox", Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "mystery"}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,6 +151,20 @@ func TestRejectsUnsafeExecutionConfiguration(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRootCannotEscapeThroughSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".pwnbridge.toml"), []byte("schema=1\n[workspace]\nroot='linked'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(root, testPaths(root)); err == nil || !strings.Contains(err.Error(), "outside") {
+		t.Fatalf("symlink escape was not rejected: %v", err)
+	}
+}
+
 func TestValidHostName(t *testing.T) {
 	for _, name := range []string{"x86", "pwn-box_2", "lab.example"} {
 		if !ValidHostName(name) {
@@ -144,6 +174,38 @@ func TestValidHostName(t *testing.T) {
 	for _, name := range []string{"", "has space", "../escape", "line\nbreak", "πwn", strings.Repeat("a", 65)} {
 		if ValidHostName(name) {
 			t.Errorf("ValidHostName(%q) = true", name)
+		}
+	}
+}
+
+func TestProjectEnvironmentRejectsReservedAndMalformedNames(t *testing.T) {
+	for key, value := range map[string]string{
+		"PWNBRIDGE_BROKER_TOKEN": "secret",
+		"1INVALID":               "value",
+		"HAS-DASH":               "value",
+	} {
+		effective := Defaults()
+		effective.Project.Environment.Set = map[string]string{key: value}
+		if err := effective.Validate(); err == nil {
+			t.Fatalf("environment key %q was accepted", key)
+		}
+	}
+	effective := Defaults()
+	effective.Project.Environment.Set = map[string]string{"LD_PRELOAD": "./libc.so.6", "PWNLIB_NOTERM": "1"}
+	if err := effective.Validate(); err != nil {
+		t.Fatalf("valid pwn environment was rejected: %v", err)
+	}
+}
+
+func TestRemoteWorkspaceRootAllowsSafeHomeAndAbsoluteRoots(t *testing.T) {
+	for _, root := range []string{"~/.local/share/pwnbridge/workspaces", "/srv/pwnbridge/workspaces"} {
+		if !validRemoteWorkspaceRoot(root) {
+			t.Fatalf("safe remote workspace root %q was rejected", root)
+		}
+	}
+	for _, root := range []string{"~/../escape", "relative/path", "/", "~/bad:port"} {
+		if validRemoteWorkspaceRoot(root) {
+			t.Fatalf("unsafe remote workspace root %q was accepted", root)
 		}
 	}
 }

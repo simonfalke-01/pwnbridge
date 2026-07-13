@@ -59,9 +59,13 @@ pwnbridge host bootstrap NAME [--profile pwn]
 ```
 
 `add` writes machine-private global config. The first host becomes the default.
+Host names are 1–64 ASCII letters, digits, `.`, `_`, or `-`; the destination is
+an ordinary OpenSSH alias or `user@host` and cannot begin with an option.
 `use` writes a local project binding. `bootstrap --dry-run` does not deploy or
 mutate; `--no-sudo` skips apt and reports missing prerequisites; the only
-profile is `pwn`.
+profile is `pwn`. Doctor/bootstrap probe reverse forwarding; unavailable
+forwarding is fatal to host-pane diagnostics but not to shell/run or explicit
+remote-multiplexer scope.
 
 ## Synchronization commands
 

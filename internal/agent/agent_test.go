@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pwnbridge/pwnbridge/internal/fsutil"
 	"github.com/pwnbridge/pwnbridge/internal/protocol"
 )
 
@@ -22,6 +23,14 @@ func TestRequestRoundTrip(t *testing.T) {
 	}
 	if len(got.Args) != 2 || got.Args[1] != "a b" {
 		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestRequestRejectsTrailingJSON(t *testing.T) {
+	encoded := base64.RawURLEncoding.EncodeToString([]byte(`{"args":["true"],"cwd":"/tmp","runtime":{},"terminal":{}} {}`))
+	var request protocol.ExecRequest
+	if err := decodeRequest([]string{encoded}, &request); err == nil {
+		t.Fatal("request with a trailing JSON value was accepted")
 	}
 }
 
@@ -113,10 +122,9 @@ esac
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PWNBRIDGE_AGENT_TEST_LOG", logPath)
-	t.Setenv("PWNBRIDGE_TERMINAL_PROVIDER", "remote-zellij")
-	t.Setenv("PWNBRIDGE_TERMINAL_PLACEMENT", "down")
 	t.Setenv("ZELLIJ", "0")
-	if err := remoteTerminalWrapper([]string{"gdb", "a b"}); err != nil {
+	terminal := protocol.TerminalSpec{Provider: "remote-zellij", Placement: "down"}
+	if err := remoteTerminalWrapper([]string{"gdb", "a b"}, terminal); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(logPath)
@@ -144,10 +152,9 @@ esac
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("PWNBRIDGE_AGENT_TEST_LOG", logPath)
-	t.Setenv("PWNBRIDGE_TERMINAL_PROVIDER", "remote-tmux")
-	t.Setenv("PWNBRIDGE_TERMINAL_PLACEMENT", "right")
 	t.Setenv("TMUX", "/tmp/tmux")
-	if err := remoteTerminalWrapper([]string{"gdb", "a b"}); err != nil {
+	terminal := protocol.TerminalSpec{Provider: "remote-tmux", Placement: "right"}
+	if err := remoteTerminalWrapper([]string{"gdb", "a b"}, terminal); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(logPath)
@@ -156,5 +163,51 @@ esac
 		if !strings.Contains(got, wanted) {
 			t.Fatalf("missing %q in calls:\n%s", wanted, got)
 		}
+	}
+}
+
+func TestRemoteMuxUsesIsolatedTmuxServer(t *testing.T) {
+	name := "pwnbridge-0123456789abcdef"
+	got := remoteMuxArgs("remote-tmux", name, "/private/managed-shell")
+	want := []string{"tmux", "-L", name, "new-session", "-s", name, "-n", "shell", "/private/managed-shell"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("tmux argv = %#v, want %#v", got, want)
+	}
+	got = remoteMuxArgs("remote-zellij", name, "/private/managed-shell")
+	if len(got) == 0 || got[0] != "zellij" {
+		t.Fatalf("zellij argv = %#v", got)
+	}
+}
+
+func TestTerminalConfigIsPrivateAndTranslatesContainerPaths(t *testing.T) {
+	session := filepath.Join(t.TempDir(), ".cache", "pwnbridge", "sessions", "0123456789abcdef")
+	if err := os.MkdirAll(session, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeSpec := protocol.RuntimeSpec{Kind: "container", ID: "pwnbridge-0123456789abcdef", SessionDir: session}
+	terminal := protocol.TerminalSpec{
+		SessionID: "0123456789abcdef", Scope: "host", Provider: "custom:test", Placement: "right",
+		Broker: "unix:" + filepath.Join(session, "broker.sock"), Token: strings.Repeat("a", 64),
+	}
+	if err := writeTerminalConfig(session, terminal, runtimeSpec); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(session, "terminal.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("terminal state mode = %o", info.Mode().Perm())
+	}
+	var got terminalConfig
+	if err := fsutil.ReadJSONLimit(path, protocol.MaxFrame, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Terminal.SessionDir != "/run/pwnbridge" || got.Terminal.Broker != "unix:/run/pwnbridge/broker.sock" {
+		t.Fatalf("container terminal paths not translated: %#v", got.Terminal)
+	}
+	if got.Runtime.SessionDir != session {
+		t.Fatalf("host runtime path was lost: %#v", got.Runtime)
 	}
 }

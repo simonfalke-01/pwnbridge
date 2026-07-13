@@ -30,6 +30,7 @@ type ExecRequest struct {
 	Args        []string          `json:"args"`
 	Cwd         string            `json:"cwd"`
 	Environment map[string]string `json:"environment,omitempty"`
+	Terminal    TerminalSpec      `json:"terminal"`
 	Runtime     RuntimeSpec       `json:"runtime"`
 }
 
@@ -39,10 +40,19 @@ type ShellRequest struct {
 	SourceUserRC bool              `json:"source_user_rc"`
 	Nonce        string            `json:"nonce"`
 	SessionID    string            `json:"session_id"`
-	BrokerSocket string            `json:"broker_socket,omitempty"`
-	BrokerToken  string            `json:"broker_token,omitempty"`
 	Environment  map[string]string `json:"environment,omitempty"`
+	Terminal     TerminalSpec      `json:"terminal"`
 	Runtime      RuntimeSpec       `json:"runtime"`
+}
+
+type TerminalSpec struct {
+	SessionID  string `json:"session_id"`
+	SessionDir string `json:"session_dir,omitempty"`
+	Broker     string `json:"broker,omitempty"`
+	Token      string `json:"token,omitempty"`
+	Scope      string `json:"scope"`
+	Provider   string `json:"provider"`
+	Placement  string `json:"placement"`
 }
 
 type RuntimeSpec struct {

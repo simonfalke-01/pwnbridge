@@ -18,3 +18,10 @@ requirements are documented in `docs/development.md`.
 Run `make e2e-lima` for the deterministic custom-provider suite or invoke a
 script directly. Set `PWNBRIDGE_E2E_PROVIDER=zellij`/`tmux` while actually
 inside that multiplexer to test native host panes.
+
+The shell suite covers prompt barriers, raw PTY behavior, signals, job control,
+readline, alternate-screen bytes, and resize propagation. The disconnect suite
+terminates a live SSH master, checks terminal restoration, reconnects, and
+proves that both workspace data and post-reconnect artifact sync survive.
+The GDB TUI test gives the custom test pane a real PTY, resizes it from 30x90
+to 45x120, and asserts the remote GDB TUI observes the new dimensions.

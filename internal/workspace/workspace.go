@@ -59,7 +59,7 @@ func (m Manager) MachineID() (string, error) {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		id := strings.TrimSpace(string(data))
-		if len(id) != 32 {
+		if !isHexID(id, 32) {
 			return "", fmt.Errorf("invalid machine id in %s", path)
 		}
 		return id, nil
@@ -77,6 +77,18 @@ func (m Manager) MachineID() (string, error) {
 	return id, nil
 }
 
+func isHexID(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func (m Manager) Resolve(localRoot, hostID, remoteRoot string) (Workspace, error) {
 	root, err := filepath.Abs(localRoot)
 	if err != nil {
@@ -92,14 +104,7 @@ func (m Manager) Resolve(localRoot, hostID, remoteRoot string) (Workspace, error
 	}
 	h := sha256.Sum256([]byte(machineID + "\x00" + root + "\x00" + hostID))
 	id := hex.EncodeToString(h[:])[:16]
-	slug := unsafeSlug.ReplaceAllString(filepath.Base(root), "-")
-	slug = strings.Trim(slug, "-.")
-	if slug == "" {
-		slug = "workspace"
-	}
-	if len(slug) > 48 {
-		slug = slug[:48]
-	}
+	slug := workspaceSlug(filepath.Base(root))
 	name := slug + "-" + id
 	stateDir := filepath.Join(m.Paths.State, "workspaces", id)
 	return Workspace{
@@ -108,6 +113,18 @@ func (m Manager) Resolve(localRoot, hostID, remoteRoot string) (Workspace, error
 		Slug: slug, StatePath: filepath.Join(stateDir, "state.json"), LockPath: filepath.Join(stateDir, "workspace.lock"),
 		RecoveryPath: filepath.Join(m.Paths.Data, "recovery", id),
 	}, nil
+}
+
+func workspaceSlug(base string) string {
+	slug := unsafeSlug.ReplaceAllString(base, "-")
+	slug = strings.Trim(slug, "-.")
+	if slug == "" {
+		slug = "workspace"
+	}
+	if len(slug) > 48 {
+		slug = slug[:48]
+	}
+	return slug
 }
 
 func (m Manager) LoadState(ws Workspace) (State, error) {
@@ -162,18 +179,42 @@ func (m Manager) SetBinding(localRoot, hostID string) error {
 type Lock struct{ file *os.File }
 
 func AcquireLock(path string) (*Lock, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock, acquired, err := acquireLock(path, false)
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		f.Close()
-		return nil, err
+	if !acquired {
+		return nil, errors.New("unexpected blocking lock result")
 	}
-	return &Lock{file: f}, nil
+	return lock, nil
+}
+
+// TryAcquireLock returns acquired=false when another live process owns the
+// advisory lease. Callers must establish any required file trust first.
+func TryAcquireLock(path string) (lock *Lock, acquired bool, err error) {
+	return acquireLock(path, true)
+}
+
+func acquireLock(path string, nonblocking bool) (*Lock, bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	operation := unix.LOCK_EX
+	if nonblocking {
+		operation |= unix.LOCK_NB
+	}
+	if err := unix.Flock(int(f.Fd()), operation); err != nil {
+		f.Close()
+		if nonblocking && (errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	return &Lock{file: f}, true, nil
 }
 
 func (l *Lock) Close() error {

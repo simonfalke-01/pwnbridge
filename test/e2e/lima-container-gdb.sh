@@ -41,8 +41,12 @@ TOML
 cat > "$TMP/challenge/solve-container.py" <<'PY'
 from pwn import *
 import importlib.metadata
+import os
+import shutil
 
 assert importlib.metadata.version("pwntools") == "4.15.0"
+assert not any(key.startswith("PWNBRIDGE_") for key in os.environ)
+assert shutil.which("pwntools-terminal")
 
 io = gdb.debug("./ret2win", gdbscript="continue\nquit")
 io.sendline(b"AAAA")

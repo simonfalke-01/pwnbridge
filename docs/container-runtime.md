@@ -21,6 +21,9 @@ docker inspect --format '{{index .RepoDigests 0}}' \
 ```
 
 Use the resulting digest, not a mutable tag, in portable configuration.
+For local development images that have no registry digest, a tag is accepted;
+Pwnbridge inspects (or pulls) it and passes the resulting immutable SHA-256
+image ID to the actual container creation command.
 
 ## Configuration
 
@@ -52,6 +55,9 @@ running, removes a dead same-name container before recreation, and removes it
 during session cleanup. `pwnbridge runtime reset` stops active clients and
 removes all Pwnbridge-labeled containers for the current workspace without
 deleting files.
+
+The configured working directory must be `/work` or a child of `/work`, because
+that is the only synchronized workspace mount.
 
 ## Mounts and identity
 

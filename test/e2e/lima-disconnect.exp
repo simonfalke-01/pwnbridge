@@ -1,0 +1,27 @@
+#!/usr/bin/expect -f
+set timeout 90
+
+set root $env(PWNBRIDGE_E2E_ROOT)
+spawn -noecho $root/bin/pwnbridge
+expect {
+    -re {[$#] $} {}
+    timeout { puts stderr "managed shell did not present a prompt before disconnect"; exit 1 }
+    eof { puts stderr "managed shell exited before disconnect test"; exit 1 }
+}
+
+set control [string trim [exec python3 -c {
+import glob, json, os
+paths = glob.glob(os.path.join(os.environ["XDG_STATE_HOME"], "pwnbridge", "sessions", "*.json"))
+assert len(paths) == 1, paths
+with open(paths[0], encoding="utf-8") as source:
+    print(json.load(source)["control_path"])
+}]]
+
+catch {exec ssh -S $control -O exit lima-pwn} disconnect_result
+expect {
+    -re {pwnbridge:.*(255|cancel|closed)} {}
+    eof { puts stderr "managed shell exited before reporting transport loss"; exit 1 }
+    timeout { puts stderr "managed shell did not report SSH transport loss"; exit 1 }
+}
+expect eof
+catch {wait}

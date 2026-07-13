@@ -1,7 +1,9 @@
 package workspace
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -103,5 +105,50 @@ func TestMachineIDConcurrentInitialization(t *testing.T) {
 		if id != want {
 			t.Fatalf("concurrent installation identities diverged: %q != %q", id, want)
 		}
+	}
+}
+
+func FuzzWorkspaceSlug(f *testing.F) {
+	f.Add("ret2win")
+	f.Add("../../\x00πwn challenge")
+	f.Fuzz(func(t *testing.T, input string) {
+		slug := workspaceSlug(input)
+		if slug == "" || len(slug) > 48 || slug == "." || slug == ".." || unsafeSlug.MatchString(slug) {
+			t.Fatalf("unsafe slug %q from %q", slug, input)
+		}
+	})
+}
+
+func TestTryAcquireLockDistinguishesLiveLease(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lease")
+	owner, err := AcquireLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock, acquired, err := TryAcquireLock(path); err != nil || acquired || lock != nil {
+		t.Fatalf("live lease was acquired twice: lock=%#v acquired=%t err=%v", lock, acquired, err)
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lock, acquired, err := TryAcquireLock(path)
+	if err != nil || !acquired || lock == nil {
+		t.Fatalf("released lease was not acquired: lock=%#v acquired=%t err=%v", lock, acquired, err)
+	}
+	_ = lock.Close()
+}
+
+func TestMachineIDRejectsPathCharacters(t *testing.T) {
+	root := t.TempDir()
+	manager := Manager{Paths: paths.Paths{State: filepath.Join(root, "state"), Data: filepath.Join(root, "data")}}
+	if err := os.MkdirAll(manager.Paths.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	malicious := "../../outside" + strings.Repeat("x", 32-len("../../outside"))
+	if err := os.WriteFile(filepath.Join(manager.Paths.State, "machine-id"), []byte(malicious), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.MachineID(); err == nil {
+		t.Fatal("path-bearing machine ID was accepted")
 	}
 }

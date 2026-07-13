@@ -32,8 +32,12 @@ sed -i.bak "s/provider = 'auto'/provider = '$PROVIDER'/" "$XDG_CONFIG_HOME/pwnbr
 
 cat > solve-gdb.py <<'PY'
 from pwn import *
+import os
+import shutil
 
 context.log_level = "debug"
+assert not any(key.startswith("PWNBRIDGE_") for key in os.environ)
+assert shutil.which("pwntools-terminal")
 io = gdb.debug("./ret2win", gdbscript="continue\nquit")
 io.sendline(b"AAAA")
 output = io.recvall(timeout=10)
@@ -90,3 +94,12 @@ if [ "$PROVIDER" = custom:e2e ]; then
     test "$(find "$TMP/provider-logs" -name 'pane-*.log' | wc -l | tr -d ' ')" -ge 5
 fi
 "$ROOT/bin/pwnbridge" clean --remote --yes
+
+# Provider panes must not leave detached helpers behind after the session and
+# broker have closed. pgrep excludes itself and the per-run path makes this
+# assertion independent of other Pwnbridge sessions on the developer machine.
+if pgrep -f "pwnbridge __pane --record $TMP/" >/dev/null 2>&1; then
+    pgrep -fl "pwnbridge __pane --record $TMP/" >&2 || true
+    echo "detached pwnbridge pane helper survived cleanup" >&2
+    exit 1
+fi

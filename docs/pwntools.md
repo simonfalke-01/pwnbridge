@@ -82,6 +82,10 @@ Pwnbridge preserves debugger-relevant values including PATH, VIRTUAL_ENV,
 It strips transport, local multiplexer, terminal, cwd, and internal broker
 fields before launching GDB in a fresh PTY.
 
+The exploit itself receives no internal `PWNBRIDGE_*` variables. The injected
+wrapper locates private mode-0600 session metadata relative to its executable,
+which keeps broker credentials out of ordinary child environments.
+
 Arguments and environment entries are individually base64 encoded. Spaces,
 Unicode, and byte-oriented argv are not re-tokenized by a shell. Manifests are
 mode 0600 and limited to 1 MiB.
@@ -128,7 +132,8 @@ Default `gdb` continues to honor the user's normal GDB configuration.
 With `terminal.scope = "remote"`, `pwntools-terminal` directly invokes remote
 tmux/Zellij splits. This is useful where reverse forwarding is disabled but is
 not compatible with container runtime and may nest inside the host
-multiplexer. Host scope is recommended.
+multiplexer. Remote tmux uses a per-session server so existing tmux sessions
+cannot override the managed Python environment. Host scope is recommended.
 
 ## Compatibility evidence
 

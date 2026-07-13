@@ -35,12 +35,41 @@ cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" run -- sh -c 'printf remote-artifact > generated.txt'
 test "$(cat generated.txt)" = remote-artifact
 
-printf base > conflict.txt
-"$ROOT/bin/pwnbridge" run -- true
 REMOTE=$("$ROOT/bin/pwnbridge" status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["workspace"]["remote_path"])')
 REMOTE_REL=$(printf '%s' "$REMOTE" | sed 's|^~/||')
-printf local-wins > conflict.txt
+
+printf '#!/bin/sh\nexit 0\n' > executable-artifact
+chmod +x executable-artifact
+ln -s flag.txt portable-link
+printf unicode-ok > "unicode-猫.txt"
+# Expansion intentionally occurs in the remote shell.
+# shellcheck disable=SC2016
+"$ROOT/bin/pwnbridge" run -- sh -c 'test -x executable-artifact && test "$(readlink portable-link)" = flag.txt && test "$(cat unicode-猫.txt)" = unicode-ok'
+
+printf delete-me > remote-delete.txt
+"$ROOT/bin/pwnbridge" run -- true
 # REMOTE_REL comes from Pwnbridge's generated workspace path.
+# shellcheck disable=SC2029
+ssh lima-pwn "rm -f -- \"\$HOME/$REMOTE_REL/remote-delete.txt\""
+"$ROOT/bin/pwnbridge" run -- true
+test ! -e remote-delete.txt
+
+# A real endpoint permission error must block execution without resetting sync
+# history; restoring the owned root must make the same session recoverable.
+# shellcheck disable=SC2029
+ssh lima-pwn "chmod 0500 \"\$HOME/$REMOTE_REL\""
+printf permission-recovery > permission-block.txt
+if "$ROOT/bin/pwnbridge" run -- true; then
+    echo "expected endpoint permission error to block execution" >&2
+    exit 1
+fi
+# shellcheck disable=SC2029
+ssh lima-pwn "chmod 0700 \"\$HOME/$REMOTE_REL\""
+"$ROOT/bin/pwnbridge" run -- test -f permission-block.txt
+
+printf base > conflict.txt
+"$ROOT/bin/pwnbridge" run -- true
+printf local-wins > conflict.txt
 # shellcheck disable=SC2029
 ssh lima-pwn "printf remote-loses > \"\$HOME/$REMOTE_REL/conflict.txt\""
 if "$ROOT/bin/pwnbridge" run -- true; then

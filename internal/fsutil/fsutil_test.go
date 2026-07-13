@@ -26,6 +26,12 @@ func TestReadJSONLimitAndStrictFields(t *testing.T) {
 	if err := ReadJSONLimit(path, 64, &got); err == nil {
 		t.Fatal("unknown field was accepted")
 	}
+	if err := os.WriteFile(path, []byte(`{"name":"ok"}{"name":"second"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadJSONLimit(path, 64, &got); err == nil {
+		t.Fatal("trailing JSON value was accepted")
+	}
 	if err := os.WriteFile(path, []byte(`{"name":"`+strings.Repeat("x", 100)+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

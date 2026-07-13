@@ -1,8 +1,13 @@
 package bootstrap
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pwnbridge/pwnbridge/internal/transport"
 )
 
 func TestNoSudoPlan(t *testing.T) {
@@ -14,6 +19,27 @@ func TestNoSudoPlan(t *testing.T) {
 		if strings.Contains(command, "sudo") {
 			t.Fatalf("sudo leaked: %s", command)
 		}
+	}
+}
+
+func TestBootstrapPreflightReportsDiskFailure(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+case " $* " in
+  *" -R 127.0.0.1:0:127.0.0.1:9 "*) exit 0 ;;
+  *"df -Pk"*) printf 'insufficient-disk-kib:1\n'; exit 22 ;;
+  *"__PWNBRIDGE_HOME__"*) printf '__PWNBRIDGE_HOME__/home/test\n__PWNBRIDGE_OS__Linux\n__PWNBRIDGE_ARCH__x86_64\n'; exit 0 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := transport.Client{SSH: ssh, Destination: "fake"}
+	err := Run(context.Background(), client, Options{DryRun: true})
+	if err == nil || !strings.Contains(err.Error(), "insufficient-disk-kib:1") {
+		t.Fatalf("disk preflight failure was not preserved: %v", err)
 	}
 }
 

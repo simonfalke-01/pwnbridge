@@ -4,7 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os/exec"
+	"reflect"
 	"testing"
+
+	"github.com/creack/pty"
+	"golang.org/x/term"
 )
 
 func TestInputControllerBuffersPastedCommands(t *testing.T) {
@@ -25,6 +31,31 @@ func TestInputControllerBuffersPastedCommands(t *testing.T) {
 	controller.Prompt(context.Background())
 	if got := terminal.String(); got != "first\rsecond\r" || barriers != 2 {
 		t.Fatalf("buffered paste was not replayed safely: output=%q barriers=%d", got, barriers)
+	}
+}
+
+func TestProxyRestoresTerminalAfterTransportExit(t *testing.T) {
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	defer slave.Close()
+	before, err := term.GetState(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (Proxy{In: slave, Out: io.Discard, Err: io.Discard}).Run(context.Background(), exec.Command("sh", "-c", "exit 255"))
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Code != 255 {
+		t.Fatalf("transport status was not preserved: %v", err)
+	}
+	after, err := term.GetState(int(slave.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("PTY state changed after failure: before=%#v after=%#v", before, after)
 	}
 }
 
@@ -50,5 +81,27 @@ func TestInputControllerPreservesPasteWhenBarrierFails(t *testing.T) {
 	controller.Prompt(context.Background())
 	if terminal.String() != "first\rsecond\r" {
 		t.Fatalf("paste was lost after recovery: %q", terminal.String())
+	}
+}
+
+func TestInputControllerHoldsAllInputDuringPostCommandBarrier(t *testing.T) {
+	var terminal bytes.Buffer
+	barriers := 0
+	controller := &inputController{
+		pty: &terminal,
+		barrier: func(context.Context) error {
+			barriers++
+			return nil
+		},
+		err: &bytes.Buffer{},
+	}
+	controller.BeginPrompt()
+	controller.Input(context.Background(), []byte("next-command\r"))
+	if terminal.Len() != 0 {
+		t.Fatalf("input escaped the post-command barrier: %q", terminal.String())
+	}
+	controller.Prompt(context.Background())
+	if got := terminal.String(); got != "next-command\r" || barriers != 1 {
+		t.Fatalf("buffered input was not replayed safely: output=%q barriers=%d", got, barriers)
 	}
 }

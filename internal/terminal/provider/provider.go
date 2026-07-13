@@ -29,16 +29,17 @@ type Capabilities struct {
 }
 
 type Spec struct {
-	SessionID      string   `json:"session_id"`
-	RequestID      string   `json:"request_id"`
-	Cwd            string   `json:"cwd"`
-	Title          string   `json:"title"`
-	Placement      string   `json:"placement"`
-	Size           string   `json:"size"`
-	Focus          bool     `json:"focus"`
-	CloseOnSuccess bool     `json:"close_on_success"`
-	HoldOnFailure  bool     `json:"hold_on_failure"`
-	Command        []string `json:"command"`
+	SessionID       string   `json:"session_id"`
+	RequestID       string   `json:"request_id"`
+	Cwd             string   `json:"cwd"`
+	Title           string   `json:"title"`
+	Placement       string   `json:"placement"`
+	Size            string   `json:"size"`
+	Focus           bool     `json:"focus"`
+	CloseOnSuccess  bool     `json:"close_on_success"`
+	HoldOnFailure   bool     `json:"hold_on_failure"`
+	NearCurrentPane bool     `json:"near_current_pane,omitempty"`
+	Command         []string `json:"command"`
 }
 
 type Handle struct {
@@ -171,7 +172,10 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 	if spec.Placement == "floating" {
 		args = append(args, "--floating")
 	} else {
-		args = append(args, "--near-current-pane", "--direction", direction(spec.Placement))
+		if spec.NearCurrentPane {
+			args = append(args, "--near-current-pane")
+		}
+		args = append(args, "--direction", direction(spec.Placement))
 	}
 	args = append(args, "--name", cleanTitle(spec.Title))
 	if spec.CloseOnSuccess {

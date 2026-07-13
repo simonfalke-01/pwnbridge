@@ -48,6 +48,8 @@ fuzz-smoke:
 	$(GO) test ./internal/protocol -run '^$$' -fuzz FuzzDecode -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/shell -run '^$$' -fuzz FuzzMarker -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/syncer -run '^$$' -fuzz FuzzMutagenHealthJSON -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/cli -run '^$$' -fuzz FuzzIgnoreParser -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/workspace -run '^$$' -fuzz FuzzWorkspaceSlug -fuzztime=$(FUZZTIME)
 
 security:
 	$(GO) run github.com/securego/gosec/v2/cmd/gosec@$(GOSEC_VERSION) -quiet -exclude=$(GOSEC_EXCLUDES) ./...
@@ -60,12 +62,15 @@ e2e-lima: build
 	: "$${PWNBRIDGE_E2E_SSH_CONFIG:?set PWNBRIDGE_E2E_SSH_CONFIG}"
 	test/e2e/lima.sh
 	test/e2e/lima-shell.sh
+	test/e2e/lima-disconnect.sh
 	test/e2e/lima-gdb.sh
+	test/e2e/lima-gdb-tui.sh
 	test/e2e/lima-pwntools-dev.sh
 	test/e2e/lima-pwndbg.sh
 	test/e2e/lima-container.sh
 	test/e2e/lima-container-gdb.sh
 	test/e2e/lima-remote-mux.sh
+	test/e2e/lima-no-forward.sh
 	test/e2e/lima-stop.sh
 
 clean:

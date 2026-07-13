@@ -105,7 +105,11 @@ func brokerPing(args []string) error {
 func probe() error {
 	home, _ := os.UserHomeDir()
 	tools := make(map[string]bool)
-	for _, tool := range []string{"bash", "gdb", "gdbserver", "python3", "file", "patchelf", "checksec", "docker", "podman", "tmux", "zellij"} {
+	for _, tool := range []string{
+		"bash", "cc", "cmake", "file", "readelf", "gdb", "gdbserver", "gdb-multiarch",
+		"patchelf", "checksec", "python3", "tmux", "strace", "ltrace", "socat", "nc",
+		"docker", "podman", "zellij",
+	} {
 		_, err := exec.LookPath(tool)
 		tools[tool] = err == nil
 	}
@@ -184,7 +188,8 @@ func execCommand(args []string) error {
 	if request.Environment == nil {
 		request.Environment = map[string]string{}
 	}
-	if sessionDir := request.Runtime.SessionDir; sessionDir != "" {
+	sessionDir := request.Runtime.SessionDir
+	if sessionDir != "" {
 		if err := os.MkdirAll(filepath.Join(sessionDir, "bin"), 0o700); err != nil {
 			return err
 		}
@@ -212,9 +217,9 @@ func execCommand(args []string) error {
 	if request.Runtime.SessionDir != "" {
 		_ = fsutil.WriteJSON(filepath.Join(request.Runtime.SessionDir, "runtime.json"), request.Runtime)
 	}
-	prepareRuntimeEnvironment(request.Runtime, request.Environment)
-	runtimeJSON, _ := json.Marshal(request.Runtime)
-	request.Environment["PWNBRIDGE_RUNTIME"] = base64.RawURLEncoding.EncodeToString(runtimeJSON)
+	if err := writeTerminalConfig(sessionDir, request.Terminal, request.Runtime); err != nil {
+		return err
+	}
 	cmd, err := pruntime.Command(request.Runtime, false, request.Cwd, request.Environment, request.Args)
 	if err != nil {
 		return err
@@ -229,6 +234,9 @@ func shellCommand(args []string) error {
 	}
 	if request.Cwd == "" || request.SessionID == "" || request.Nonce == "" {
 		return errors.New("shell request is incomplete")
+	}
+	if request.Terminal.SessionID != request.SessionID {
+		return errors.New("shell terminal session does not match request")
 	}
 	request.Cwd = expandHome(request.Cwd)
 	if request.Shell == "" {
@@ -262,15 +270,8 @@ func shellCommand(args []string) error {
 	}
 	_ = fsutil.WriteJSON(filepath.Join(sessionDir, "runtime.json"), request.Runtime)
 	env := cloneMap(request.Environment)
-	env["PWNBRIDGE_SESSION_ID"] = request.SessionID
-	env["PWNBRIDGE_SESSION_DIR"] = sessionDir
-	env["PWNBRIDGE_BROKER"] = request.BrokerSocket
-	env["PWNBRIDGE_BROKER_TOKEN"] = request.BrokerToken
-	runtimeJSON, _ := json.Marshal(request.Runtime)
-	env["PWNBRIDGE_RUNTIME"] = base64.RawURLEncoding.EncodeToString(runtimeJSON)
 	if request.Runtime.Kind == "container" {
 		env["PATH"] = "/run/pwnbridge/bin:" + getenvDefault(request.Environment, "PATH", containerDefaultPATH)
-		prepareRuntimeEnvironment(request.Runtime, env)
 		rcPath = "/run/pwnbridge/bashrc"
 	} else {
 		pathParts := []string{filepath.Join(sessionDir, "bin")}
@@ -284,8 +285,11 @@ func shellCommand(args []string) error {
 		pathParts = append(pathParts, getenvDefault(request.Environment, "PATH", os.Getenv("PATH")))
 		env["PATH"] = strings.Join(pathParts, ":")
 	}
+	if err := writeTerminalConfig(sessionDir, request.Terminal, request.Runtime); err != nil {
+		return err
+	}
 	cmd, err := pruntime.Command(request.Runtime, true, request.Cwd, env, []string{"bash", "--noprofile", "--rcfile", rcPath, "-i"})
-	if env["PWNBRIDGE_TERMINAL_SCOPE"] == "remote" {
+	if request.Terminal.Scope == "remote" {
 		if request.Runtime.Kind == "container" {
 			return errors.New("remote multiplexer scope is incompatible with container runtime; use a host terminal provider")
 		}
@@ -295,7 +299,7 @@ func shellCommand(args []string) error {
 		if err := fsutil.AtomicWrite(wrapper, []byte(content), 0o700); err != nil {
 			return err
 		}
-		mux := env["PWNBRIDGE_TERMINAL_PROVIDER"]
+		mux := request.Terminal.Provider
 		if mux == "" || mux == "auto" {
 			if _, err := exec.LookPath("tmux"); err == nil {
 				mux = "tmux"
@@ -304,18 +308,23 @@ func shellCommand(args []string) error {
 			}
 		}
 		name := "pwnbridge-" + request.SessionID
-		var argv []string
-		if strings.Contains(mux, "tmux") {
-			argv = []string{"tmux", "new-session", "-s", name, "-n", "shell", wrapper}
-		} else {
-			argv = []string{"zellij", "attach", "--create", name, "options", "--default-shell", wrapper}
-		}
+		argv := remoteMuxArgs(mux, name, wrapper)
 		cmd, err = pruntime.Command(request.Runtime, true, request.Cwd, env, argv)
 	}
 	if err != nil {
 		return err
 	}
 	return replaceProcess(cmd)
+}
+
+func remoteMuxArgs(mux, name, wrapper string) []string {
+	if strings.Contains(mux, "tmux") {
+		// A tmux server retains the environment with which it was first started.
+		// Give every managed session a private server so that an unrelated or
+		// stale tmux server cannot discard this session's PATH/VIRTUAL_ENV.
+		return []string{"tmux", "-L", name, "new-session", "-s", name, "-n", "shell", wrapper}
+	}
+	return []string{"zellij", "attach", "--create", name, "options", "--default-shell", wrapper}
 }
 
 func shellSingleQuote(value string) string {
@@ -369,11 +378,15 @@ func terminalWrapper(args []string) error {
 	if len(args) == 0 {
 		return errors.New("pwntools-terminal requires a command")
 	}
-	if os.Getenv("PWNBRIDGE_TERMINAL_SCOPE") == "remote" {
-		return remoteTerminalWrapper(args)
+	config, err := loadTerminalConfig()
+	if err != nil {
+		return err
 	}
-	sessionID, sessionDir := os.Getenv("PWNBRIDGE_SESSION_ID"), os.Getenv("PWNBRIDGE_SESSION_DIR")
-	broker, token := os.Getenv("PWNBRIDGE_BROKER"), os.Getenv("PWNBRIDGE_BROKER_TOKEN")
+	if config.Terminal.Scope == "remote" {
+		return remoteTerminalWrapper(args, config.Terminal)
+	}
+	sessionID, sessionDir := config.Terminal.SessionID, config.Terminal.SessionDir
+	broker, token := config.Terminal.Broker, config.Terminal.Token
 	if !validID(sessionID) || sessionDir == "" || broker == "" || token == "" {
 		return errors.New("pwntools-terminal is outside a pwnbridge broker session")
 	}
@@ -385,15 +398,10 @@ func terminalWrapper(args []string) error {
 	if err != nil {
 		return err
 	}
-	var runtimeSpec protocol.RuntimeSpec
-	encodedRuntime := os.Getenv("PWNBRIDGE_RUNTIME")
-	if data, decodeErr := base64.RawURLEncoding.DecodeString(encodedRuntime); decodeErr == nil {
-		_ = json.Unmarshal(data, &runtimeSpec)
-	}
 	manifest := protocol.Manifest{
 		Protocol: version.ProtocolVersion, SessionID: sessionID, RequestID: requestID,
 		ArgvBase64: encodeStrings(args), EnvBase64: encodeStrings(os.Environ()),
-		CwdBase64: base64.StdEncoding.EncodeToString([]byte(cwd)), Runtime: runtimeSpec,
+		CwdBase64: base64.StdEncoding.EncodeToString([]byte(cwd)), Runtime: config.Runtime,
 	}
 	manifestPath := filepath.Join(sessionDir, "requests", requestID+".json")
 	if err := fsutil.WriteJSON(manifestPath, manifest); err != nil {
@@ -453,8 +461,8 @@ func terminalWrapper(args []string) error {
 	}
 }
 
-func remoteTerminalWrapper(args []string) error {
-	provider := os.Getenv("PWNBRIDGE_TERMINAL_PROVIDER")
+func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error {
+	provider := terminal.Provider
 	if provider == "" || provider == "auto" {
 		if os.Getenv("TMUX") != "" {
 			provider = "tmux"
@@ -472,7 +480,7 @@ func remoteTerminalWrapper(args []string) error {
 			return errors.New("remote tmux provider is not active")
 		}
 		arguments := []string{"split-window", "-P", "-F", "#{pane_id}", "-c", cwd}
-		if os.Getenv("PWNBRIDGE_TERMINAL_PLACEMENT") != "down" {
+		if terminal.Placement != "down" {
 			arguments = append(arguments, "-h")
 		}
 		arguments = append(arguments, args...)
@@ -482,7 +490,7 @@ func remoteTerminalWrapper(args []string) error {
 			return errors.New("remote Zellij provider is not active")
 		}
 		arguments := []string{"action", "new-pane", "--near-current-pane", "--direction", "right", "--name", "pwntools GDB", "--close-on-exit", "--"}
-		if os.Getenv("PWNBRIDGE_TERMINAL_PLACEMENT") == "down" {
+		if terminal.Placement == "down" {
 			arguments[4] = "down"
 		}
 		arguments = append(arguments, args...)
@@ -548,7 +556,14 @@ func decodeRequest(args []string, target any) error {
 	}
 	dec := json.NewDecoder(strings.NewReader(string(data)))
 	dec.DisallowUnknownFields()
-	return dec.Decode(target)
+	if err := dec.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("request contains trailing JSON value")
+	}
+	return nil
 }
 
 func EncodeRequest(value any) (string, error) {
@@ -626,6 +641,106 @@ func installWrapper(target string) error {
 		return err
 	}
 	return dst.Close()
+}
+
+const terminalConfigSchema = 1
+
+type terminalConfig struct {
+	Schema   int                   `json:"schema"`
+	Terminal protocol.TerminalSpec `json:"terminal"`
+	Runtime  protocol.RuntimeSpec  `json:"runtime"`
+}
+
+func writeTerminalConfig(sessionDir string, terminal protocol.TerminalSpec, runtimeSpec protocol.RuntimeSpec) error {
+	if sessionDir == "" {
+		return errors.New("terminal session directory is missing")
+	}
+	if runtimeSpec.SessionDir != sessionDir {
+		return errors.New("terminal session directory does not match runtime")
+	}
+	terminal.SessionDir = sessionDir
+	if runtimeSpec.Kind == "container" {
+		paths := map[string]string{
+			"PWNBRIDGE_SESSION_DIR": sessionDir,
+			"PWNBRIDGE_BROKER":      terminal.Broker,
+		}
+		prepareRuntimeEnvironment(runtimeSpec, paths)
+		terminal.SessionDir = paths["PWNBRIDGE_SESSION_DIR"]
+		terminal.Broker = paths["PWNBRIDGE_BROKER"]
+	}
+	config := terminalConfig{Schema: terminalConfigSchema, Terminal: terminal, Runtime: runtimeSpec}
+	if err := validateTerminalConfig(config); err != nil {
+		return err
+	}
+	return fsutil.WriteJSON(filepath.Join(sessionDir, "terminal.json"), config)
+}
+
+func loadTerminalConfig() (terminalConfig, error) {
+	var config terminalConfig
+	executable := os.Args[0]
+	if !filepath.IsAbs(executable) {
+		resolved, err := exec.LookPath(executable)
+		if err != nil {
+			return config, fmt.Errorf("locate pwntools-terminal: %w", err)
+		}
+		executable = resolved
+	}
+	executable, err := filepath.Abs(executable)
+	if err != nil {
+		return config, err
+	}
+	path := filepath.Join(filepath.Dir(filepath.Dir(executable)), "terminal.json")
+	info, err := os.Lstat(path)
+	if err != nil {
+		return config, fmt.Errorf("read pwntools terminal session: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return config, errors.New("pwntools terminal session state is not a private regular file")
+	}
+	if err := fsutil.ReadJSONLimit(path, protocol.MaxFrame, &config); err != nil {
+		return config, fmt.Errorf("read pwntools terminal session: %w", err)
+	}
+	if err := validateTerminalConfig(config); err != nil {
+		return config, err
+	}
+	return config, nil
+}
+
+func validateTerminalConfig(config terminalConfig) error {
+	terminal := config.Terminal
+	if config.Schema != terminalConfigSchema || !validID(terminal.SessionID) || terminal.SessionDir == "" {
+		return errors.New("invalid pwntools terminal session state")
+	}
+	if terminal.Scope != "host" && terminal.Scope != "remote" {
+		return errors.New("invalid pwntools terminal scope")
+	}
+	if terminal.Provider == "" || len(terminal.Provider) > 80 || strings.IndexAny(terminal.Provider, "\x00\r\n") >= 0 {
+		return errors.New("invalid pwntools terminal provider")
+	}
+	switch terminal.Placement {
+	case "right", "down", "tab", "floating", "window":
+	default:
+		return errors.New("invalid pwntools terminal placement")
+	}
+	if terminal.Broker == "" {
+		if terminal.Token != "" {
+			return errors.New("pwntools terminal token has no broker")
+		}
+	} else {
+		if len(terminal.Token) < 32 {
+			return errors.New("pwntools terminal broker token is invalid")
+		}
+		if _, _, err := validateBrokerAddress(terminal.Broker); err != nil {
+			return err
+		}
+	}
+	if config.Runtime.SessionDir == "" {
+		return errors.New("pwntools terminal runtime state is incomplete")
+	}
+	if config.Runtime.ID != "pwnbridge-"+terminal.SessionID {
+		return errors.New("pwntools terminal runtime identity mismatch")
+	}
+	return nil
 }
 
 func dialBroker(address string) (net.Conn, error) {

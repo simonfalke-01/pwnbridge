@@ -104,7 +104,7 @@ One-shot `run` performs the same pre/post barriers without prompt markers.
 ## OpenSSH transport
 
 Pwnbridge launches a private control master with agent/X11 forwarding disabled,
-no persistent control socket, keepalives, and strict forwarding failure:
+no persistent control socket, and keepalives:
 
 ```text
 ssh -M -N -S <short-private-path>
@@ -123,7 +123,10 @@ session socket to the Mac broker socket. If the server disables stream-local
 forwarding, it asks OpenSSH for a remote loopback TCP port. When `socat` is
 available, that TCP endpoint is re-exposed as the same private Unix socket so a
 bridge-network container can still reach it. All fallbacks require an
-end-to-end authenticated ping before execution begins.
+end-to-end authenticated ping before a host-pane debugger is enabled. If both
+forwarding forms are unavailable, Pwnbridge keeps the control master and normal
+shell/run channels, omits broker credentials, and reports that host-pane GDB is
+unavailable. Remote tmux/Zellij scope needs no broker forward.
 
 ## Agent protocol and process execution
 
@@ -154,9 +157,11 @@ Interactive channels use a local PTY proxy and remote `ssh -tt -e none`:
 ## Pwntools terminal broker
 
 Pwntools finds the injected `pwntools-terminal` before its built-in multiplexer
-heuristics. The wrapper receives pwntools' generated command, stores argv,
-environment, and cwd as base64 fields in a bounded mode-0600 manifest, and sends
-only opaque session/request IDs to the Mac.
+heuristics. The wrapper discovers its mode-0600 `terminal.json` from its own
+session-local executable path, so broker credentials are not exported to the
+exploit. It stores pwntools' generated argv, environment, and cwd as base64
+fields in a bounded mode-0600 manifest and sends only opaque session/request
+IDs to the Mac.
 
 The broker validates protocol version, a random 256-bit session token, IDs,
 rate limits, and an eight-pane concurrency cap. It constructs exactly one local

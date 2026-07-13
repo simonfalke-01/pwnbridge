@@ -65,6 +65,7 @@ type activeSession struct {
 	Record     broker.SessionRecord
 	Broker     *broker.Broker
 	Master     *transport.Master
+	Lease      *workspace.Lock
 	closed     bool
 }
 
@@ -125,6 +126,10 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 	}
 	host, ok := effective.Global.Hosts[hostID]
 	if !ok {
+		if !requireHost {
+			mutagen := syncer.Mutagen{Runner: syncer.DefaultRunner(effective.MutagenPath, a.Paths.State)}
+			return &projectContext{Config: effective, Manager: manager, Sync: mutagen}, nil
+		}
 		return nil, fmt.Errorf("host %q is not configured", hostID)
 	}
 	remoteRoot := host.WorkspaceRoot
@@ -144,6 +149,9 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 }
 
 func (a *App) ensureSync(ctx context.Context, p *projectContext) error {
+	if p.Config.Global.Sync.SymlinkMode == "posix-raw" {
+		fmt.Fprintln(a.Err, "warning: sync.symlink_mode=posix-raw preserves raw links and can create cross-platform escape targets; portable is safer")
+	}
 	lock, err := workspace.AcquireLock(p.WS.LockPath)
 	if err != nil {
 		return err
@@ -156,7 +164,7 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext) error {
 		remoteOperation = "test -d " + remotePath + " && test ! -L " + remotePath
 		operation = "validate"
 	}
-	if output, remoteErr := exec.CommandContext(ctx, "ssh", "-T", p.Host.Destination, remoteOperation).CombinedOutput(); remoteErr != nil {
+	if output, remoteErr := sshCommand(ctx, "-T", p.Host.Destination, remoteOperation).CombinedOutput(); remoteErr != nil {
 		if operation == "validate" {
 			return fmt.Errorf("remote workspace root is missing or was replaced; execution is blocked to protect the local copy. Verify local files, then run `pwnbridge clean` to explicitly create new synchronization history: %w: %s", remoteErr, strings.TrimSpace(string(output)))
 		}
@@ -244,25 +252,29 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 	localSocket := filepath.Join(runtimeDir, "b.sock")
 	remoteSocket := filepath.Join(remoteDir, "broker.sock")
 	prepare := "umask 077; mkdir -p -- " + remoteShellPath(filepath.Join(remoteDir, "requests"))
-	if output, prepareErr := exec.CommandContext(ctx, "ssh", "-T", p.Host.Destination, prepare).CombinedOutput(); prepareErr != nil {
+	if output, prepareErr := sshCommand(ctx, "-T", p.Host.Destination, prepare).CombinedOutput(); prepareErr != nil {
 		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("create remote session directory: %w: %s", prepareErr, strings.TrimSpace(string(output)))
 	}
 	recordPath := filepath.Join(a.Paths.State, "sessions", id+".json")
+	leasePath := recordPath + ".lease"
 	executable, err := os.Executable()
 	if err != nil {
 		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
-	placement, paneSize := terminalLayout(p.Config.Global.Terminal)
+	terminalConfig := p.Config.Global.Terminal
 	record := broker.SessionRecord{
 		ID: id, OwnerPID: os.Getpid(), Token: token, LocalSocket: localSocket, RemoteSocket: remoteSocket,
 		Destination: p.Host.Destination, AgentPath: remoteAgent, RemoteSessionDir: remoteDir,
 		LocalWorkspace: p.WS.LocalRoot, Executable: executable, Provider: p.Config.Global.Terminal.Provider,
-		RecordPath: recordPath,
-		Placement:  placement, Size: paneSize,
+		RecordPath: recordPath, LeasePath: leasePath,
+		Placement: terminalConfig.Placement, Size: terminalConfig.Size,
 		Focus: p.Config.Global.Terminal.Focus, CloseOnSuccess: p.Config.Global.Terminal.CloseOnSuccess,
-		HoldOnFailure: p.Config.Global.Terminal.HoldOnFailure,
+		HoldOnFailure:         p.Config.Global.Terminal.HoldOnFailure,
+		ZellijNearCurrentPane: terminalConfig.Zellij.NearCurrentPane,
+		ZellijDirection:       terminalConfig.Zellij.Direction, ZellijFloating: terminalConfig.Zellij.Floating,
+		TmuxDirection: terminalConfig.Tmux.Direction, TmuxSize: terminalConfig.Tmux.Size,
 		Runtime: protocol.RuntimeSpec{
 			Kind: p.Config.Project.Runtime.Kind, Engine: p.Config.Project.Runtime.Container.Engine,
 			Image: p.Config.Project.Runtime.Container.Image, Workdir: p.Config.Project.Runtime.Container.Workdir,
@@ -270,37 +282,80 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 			Workspace: p.WS.RemotePath, WorkspaceID: p.WS.ID, SessionDir: remoteDir,
 		},
 	}
-	registry := provider.NewRegistry(runtimeDir)
-	b := broker.New(record, registry)
-	b.BeforeOpen = func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }
-	if err := b.Start(); err != nil {
-		os.RemoveAll(runtimeDir)
-		return nil, err
+	var b *broker.Broker
+	var master *transport.Master
+	if p.Config.Global.Terminal.Scope == "remote" {
+		record.LocalSocket, record.RemoteSocket = "", ""
+		master, err = client.StartControlMaster(ctx, runtimeDir)
+	} else {
+		registry := provider.NewRegistry(runtimeDir)
+		b = broker.New(record, registry)
+		b.BeforeOpen = func(barrierCtx context.Context) error { return a.barrier(barrierCtx, p) }
+		if err = b.Start(); err == nil {
+			record.LocalTCP = b.Record.LocalTCP
+			master, err = client.StartMaster(ctx, runtimeDir, localSocket, remoteSocket, record.LocalTCP)
+			if err == nil && p.Config.Project.Runtime.Kind == "container" && strings.HasPrefix(master.BrokerAddress, "tcp:") {
+				_ = master.Close()
+				err = errors.New("container debugger panes require the remote socat relay for TCP forwarding fallback")
+			}
+		}
+		if err != nil {
+			_ = b.Close()
+			b = nil
+			forwardErr := err
+			master, err = client.StartControlMaster(ctx, runtimeDir)
+			if err == nil {
+				record.LocalSocket, record.LocalTCP, record.RemoteSocket = "", "", ""
+				fmt.Fprintf(a.Err, "warning: debugger host panes are unavailable (%v); shell/run remain usable, or set terminal.scope=remote\n", forwardErr)
+			}
+		}
 	}
-	record.LocalTCP = b.Record.LocalTCP
-	master, err := client.StartMaster(ctx, runtimeDir, localSocket, remoteSocket, record.LocalTCP)
 	if err != nil {
-		b.Close()
+		if b != nil {
+			_ = b.Close()
+		}
 		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
 	record.ControlPath = master.ControlPath
 	record.RemoteSocket = master.BrokerAddress
-	b.Record = record
-	if err := broker.SaveSession(recordPath, record); err != nil {
+	if b != nil {
+		b.Record = record
+	}
+	lease, err := workspace.AcquireLock(leasePath)
+	if err != nil {
 		master.Close()
-		b.Close()
+		if b != nil {
+			b.Close()
+		}
+		os.RemoveAll(runtimeDir)
+		return nil, fmt.Errorf("acquire session lease: %w", err)
+	}
+	if err := broker.SaveSession(recordPath, record); err != nil {
+		lease.Close()
+		_ = os.Remove(leasePath)
+		master.Close()
+		if b != nil {
+			b.Close()
+		}
 		os.RemoveAll(runtimeDir)
 		return nil, err
 	}
-	if _, err := master.Run(ctx, "broker-ping", protocol.BrokerPing{SessionID: id, Address: record.RemoteSocket, Token: token}); err != nil {
+	if b != nil {
+		_, err = master.Run(ctx, "broker-ping", protocol.BrokerPing{SessionID: id, Address: record.RemoteSocket, Token: token})
+	}
+	if err != nil {
 		master.Close()
-		b.Close()
+		if b != nil {
+			b.Close()
+		}
 		os.Remove(recordPath)
+		lease.Close()
+		_ = os.Remove(leasePath)
 		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("reverse broker verification failed: %w", err)
 	}
-	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master}, nil
+	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Lease: lease}, nil
 }
 
 func (s *activeSession) runtimeSpec() protocol.RuntimeSpec {
@@ -312,11 +367,6 @@ func (s *activeSession) environment() map[string]string {
 	for key, value := range s.project.Config.Project.Environment.Set {
 		env[key] = value
 	}
-	env["PWNBRIDGE_SESSION_ID"], env["PWNBRIDGE_SESSION_DIR"] = s.ID, s.RemoteDir
-	env["PWNBRIDGE_BROKER"], env["PWNBRIDGE_BROKER_TOKEN"] = s.Record.RemoteSocket, s.Token
-	env["PWNBRIDGE_TERMINAL_SCOPE"] = s.project.Config.Global.Terminal.Scope
-	env["PWNBRIDGE_TERMINAL_PROVIDER"] = s.project.Config.Global.Terminal.Provider
-	env["PWNBRIDGE_TERMINAL_PLACEMENT"] = s.project.Config.Global.Terminal.Placement
 	termName := os.Getenv("TERM")
 	if termName == "" || termName == "dumb" {
 		termName = "xterm-256color"
@@ -328,6 +378,21 @@ func (s *activeSession) environment() map[string]string {
 		}
 	}
 	return env
+}
+
+func (s *activeSession) terminalSpec() protocol.TerminalSpec {
+	terminal := protocol.TerminalSpec{
+		SessionID: s.ID,
+		Scope:     s.project.Config.Global.Terminal.Scope,
+		Provider:  s.project.Config.Global.Terminal.Provider,
+		// Provider-specific host layout is resolved by the local broker after
+		// auto-selection. Remote scope supports only the global right/down value.
+		Placement: s.project.Config.Global.Terminal.Placement,
+	}
+	if s.Record.RemoteSocket != "" {
+		terminal.Broker, terminal.Token = s.Record.RemoteSocket, s.Token
+	}
+	return terminal
 }
 
 func (s *activeSession) Close(ctx context.Context) error {
@@ -349,11 +414,12 @@ func (s *activeSession) Close(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("remote cleanup: %w", err))
 		}
 	}
+	finalSyncOK := true
 	if err := s.app.barrier(ctx, s.project); err != nil {
+		finalSyncOK = false
 		errs = append(errs, fmt.Errorf("final sync: %w", err))
 	}
-	_ = os.Remove(s.RecordPath)
-	if s.project.Config.Global.Sync.PauseOnIdle && s.project.State.MutagenIdentifier != "" {
+	if finalSyncOK && s.project.Config.Global.Sync.PauseOnIdle && s.project.State.MutagenIdentifier != "" {
 		if other, leaseErr := s.app.hasOtherLease(s.project.WS.LocalRoot, s.ID); leaseErr != nil {
 			errs = append(errs, leaseErr)
 		} else if !other {
@@ -364,6 +430,11 @@ func (s *activeSession) Close(ctx context.Context) error {
 	}
 	if s.Master != nil {
 		_ = s.Master.Close()
+	}
+	_ = os.Remove(s.RecordPath)
+	if s.Lease != nil {
+		_ = s.Lease.Close()
+		_ = os.Remove(s.Record.LeasePath)
 	}
 	_ = os.RemoveAll(s.RuntimeDir)
 	return errors.Join(errs...)
@@ -383,7 +454,7 @@ func (a *App) shell(ctx context.Context) (result error) {
 			result = errors.Join(result, closeErr)
 		}
 	}()
-	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, BrokerSocket: session.Record.RemoteSocket, BrokerToken: session.Token, Environment: session.environment(), Runtime: session.runtimeSpec()}
+	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
 	encoded, err := agent.EncodeRequest(request)
 	if err != nil {
 		return err
@@ -417,7 +488,7 @@ func (a *App) runCommand() *cobra.Command {
 					result = errors.Join(result, closeErr)
 				}
 			}()
-			request := protocol.ExecRequest{Args: args, Cwd: p.WS.RemotePath, Environment: session.environment(), Runtime: session.runtimeSpec()}
+			request := protocol.ExecRequest{Args: args, Cwd: p.WS.RemotePath, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
 			encoded, err := agent.EncodeRequest(request)
 			if err != nil {
 				return err
@@ -530,7 +601,7 @@ func (a *App) doctorCommand() *cobra.Command {
 			} else {
 				agentErr = assetErr
 			}
-			checks = append(checks, diagnostics.Remote(cmd.Context(), client)...)
+			checks = append(checks, diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote")...)
 			if agentErr != nil {
 				checks = append(checks, diagnostics.Check{Name: "diagnostic-agent", OK: false, Detail: agentErr.Error(), Remediation: "run make build or reinstall pwnbridge"})
 			}
@@ -602,7 +673,7 @@ func (a *App) cleanCommand() *cobra.Command {
 		}
 		if remote {
 			remotePath := remoteShellPath(p.WS.RemotePath)
-			out, err := exec.CommandContext(cmd.Context(), "ssh", "-T", p.Host.Destination, "rm -rf -- "+remotePath).CombinedOutput()
+			out, err := sshCommand(cmd.Context(), "-T", p.Host.Destination, "rm -rf -- "+remotePath).CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("remove remote workspace: %w: %s", err, strings.TrimSpace(string(out)))
 			}
@@ -725,7 +796,15 @@ func (a *App) hostRemove() *cobra.Command {
 		if p.Config.Global.DefaultHost == args[0] {
 			p.Config.Global.DefaultHost = ""
 		}
-		return config.SaveGlobal(p.Config.GlobalPath, p.Config.Global)
+		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
+			return err
+		}
+		if bound, err := p.Manager.Binding(p.Config.ProjectRoot); err != nil {
+			return err
+		} else if bound == args[0] {
+			return p.Manager.SetBinding(p.Config.ProjectRoot, "")
+		}
+		return nil
 	}}
 }
 
@@ -750,7 +829,7 @@ func (a *App) hostDoctor() *cobra.Command {
 			return fmt.Errorf("deploy diagnostic agent: %w", deployErr)
 		}
 		client.AgentPath = remoteAgent
-		checks := diagnostics.Remote(cmd.Context(), client)
+		checks := diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote")
 		if asJSON {
 			if err := writeJSON(a.Out, map[string]any{"ok": diagnostics.Healthy(checks), "checks": checks}); err != nil {
 				return err
@@ -812,6 +891,15 @@ func (a *App) hostBootstrap() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		if engine := configuredContainerEngine(p.Config); engine != "" {
+			available := probe.Tools[engine]
+			if engine == "auto" {
+				available = probe.Tools["podman"] || probe.Tools["docker"]
+			}
+			if !available {
+				return fmt.Errorf("configured container engine %q is unavailable after bootstrap", engine)
+			}
+		}
 		fmt.Fprintf(a.Out, "bootstrapped %s (%s/%s)\n", args[0], probe.OS, probe.Architecture)
 		return nil
 	}}
@@ -820,6 +908,13 @@ func (a *App) hostBootstrap() *cobra.Command {
 	cmd.Flags().BoolVar(&options.DryRun, "dry-run", false, "print commands without running them")
 	cmd.Flags().BoolVar(&options.NoSudo, "no-sudo", false, "skip system packages")
 	return cmd
+}
+
+func configuredContainerEngine(e config.Effective) string {
+	if e.Project.Runtime.Kind != "container" {
+		return ""
+	}
+	return e.Project.Runtime.Container.Engine
 }
 
 func (a *App) syncCommand() *cobra.Command {
@@ -925,7 +1020,7 @@ func (a *App) resolveCommand() *cobra.Command {
 		resolved := map[string]bool{}
 		for _, value := range args {
 			rel := filepath.Clean(value)
-			if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			if filepath.IsAbs(rel) || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 				return fmt.Errorf("path %q escapes workspace", value)
 			}
 			if !conflicts[rel] {
@@ -935,6 +1030,12 @@ func (a *App) resolveCommand() *cobra.Command {
 				return fmt.Errorf("path %q was specified more than once", value)
 			}
 			resolved[rel] = true
+			if err := rejectSymlinkParents(p.WS.LocalRoot, rel); err != nil {
+				return fmt.Errorf("unsafe local conflict path %q: %w", value, err)
+			}
+			if output, checkErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, remoteSymlinkParentCheck(p.WS.RemotePath, rel)).CombinedOutput(); checkErr != nil {
+				return fmt.Errorf("unsafe remote conflict path %q: %w: %s", value, checkErr, strings.TrimSpace(string(output)))
+			}
 			backup := filepath.Join(p.WS.RecoveryPath, timestamp, prefer+"-winner", rel)
 			if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
 				return err
@@ -949,11 +1050,13 @@ func (a *App) resolveCommand() *cobra.Command {
 					return err
 				}
 			} else {
-				out, copyErr := exec.CommandContext(cmd.Context(), "scp", "-q", "-r", "-p", "--", p.Host.Destination+":"+remote, backup).CombinedOutput()
+				copyCommand := exec.CommandContext(cmd.Context(), "scp", "-q", "-r", "-p", "--", p.Host.Destination+":"+remote, backup)
+				copyCommand.Env = transport.SafeSSHEnvironment()
+				out, copyErr := copyCommand.CombinedOutput()
 				if copyErr != nil {
 					return fmt.Errorf("back up remote loser: %w: %s", copyErr, strings.TrimSpace(string(out)))
 				}
-				out, removeErr := exec.CommandContext(cmd.Context(), "ssh", "-T", p.Host.Destination, "rm -rf -- "+remoteShellPath(remote)).CombinedOutput()
+				out, removeErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, "rm -rf -- "+remoteShellPath(remote)).CombinedOutput()
 				if removeErr != nil {
 					return fmt.Errorf("remove remote loser: %w: %s", removeErr, strings.TrimSpace(string(out)))
 				}
@@ -1051,7 +1154,7 @@ func (a *App) runtimeCommand() *cobra.Command {
 		engine := p.Config.Project.Runtime.Container.Engine
 		if engine == "" || engine == "auto" {
 			probe := `if command -v podman >/dev/null 2>&1; then printf podman; elif command -v docker >/dev/null 2>&1; then printf docker; else exit 127; fi`
-			out, probeErr := exec.CommandContext(cmd.Context(), "ssh", "-T", p.Host.Destination, probe).CombinedOutput()
+			out, probeErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, probe).CombinedOutput()
 			if probeErr != nil {
 				return fmt.Errorf("detect remote container engine: %w: %s", probeErr, strings.TrimSpace(string(out)))
 			}
@@ -1063,7 +1166,7 @@ func (a *App) runtimeCommand() *cobra.Command {
 		label := "pwnbridge.workspace=" + p.WS.ID
 		command := "ids=$(" + engine + " ps -aq --filter label=" + remoteShellPath(label) + "); " +
 			"if [ -n \"$ids\" ]; then " + engine + " rm -f $ids; fi"
-		out, runErr := exec.CommandContext(cmd.Context(), "ssh", "-T", p.Host.Destination, command).CombinedOutput()
+		out, runErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, command).CombinedOutput()
 		if runErr != nil {
 			return fmt.Errorf("reset runtime: %w: %s", runErr, strings.TrimSpace(string(out)))
 		}
@@ -1198,14 +1301,29 @@ func (a *App) liveSessions(localWorkspace string) ([]broker.SessionRecord, error
 		if record.LocalWorkspace != localWorkspace {
 			continue
 		}
+		leaseActive, leaseErr := sessionLeaseActive(record)
+		if leaseErr != nil {
+			return nil, leaseErr
+		}
+		if !leaseActive {
+			removeStaleSession(record)
+			continue
+		}
+		if !processAlive(record.OwnerPID) {
+			return nil, fmt.Errorf("session %s lease is held but owner process %d is unavailable", record.ID, record.OwnerPID)
+		}
+		// Remote-multiplexer sessions, and sessions degraded to shell/run-only
+		// because sshd forbids reverse forwarding, intentionally have no local
+		// broker socket. Their owning process is the lease and stop target.
+		if record.LocalSocket == "" {
+			sessions = append(sessions, record)
+			continue
+		}
 		if pingErr := broker.Ping(record); pingErr == nil {
 			sessions = append(sessions, record)
 			continue
 		}
-		if processAlive(record.OwnerPID) {
-			return nil, fmt.Errorf("session %s owner process %d is alive but its broker is unreachable; wait or terminate that pwnbridge process", record.ID, record.OwnerPID)
-		}
-		_ = os.Remove(path)
+		return nil, fmt.Errorf("session %s owner process %d is alive but its broker is unreachable; wait or terminate that pwnbridge process", record.ID, record.OwnerPID)
 	}
 	return sessions, nil
 }
@@ -1239,10 +1357,14 @@ func (a *App) hasOtherLease(localWorkspace, excludingID string) (bool, error) {
 		if record.ID == excludingID || record.LocalWorkspace != localWorkspace {
 			continue
 		}
-		if processAlive(record.OwnerPID) || broker.Ping(record) == nil {
+		leaseActive, leaseErr := sessionLeaseActive(record)
+		if leaseErr != nil {
+			return false, leaseErr
+		}
+		if leaseActive {
 			return true, nil
 		}
-		_ = os.Remove(path)
+		removeStaleSession(record)
 	}
 	return false, nil
 }
@@ -1311,20 +1433,68 @@ func ownedRegularFile(info os.FileInfo) bool {
 	return ok && int(stat.Uid) == os.Getuid()
 }
 
-func projectIgnores(root string, configured []string) ([]string, error) {
-	result := append([]string(nil), configured...)
-	data, err := os.ReadFile(filepath.Join(root, ".pwnbridgeignore"))
+func sessionLeaseActive(record broker.SessionRecord) (bool, error) {
+	info, err := os.Lstat(record.LeasePath)
 	if errors.Is(err, os.ErrNotExist) {
-		return result, nil
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !ownedRegularFile(info) || info.Mode().Perm()&0o077 != 0 {
+		return false, fmt.Errorf("unsafe session lease %s", record.LeasePath)
+	}
+	lock, acquired, err := workspace.TryAcquireLock(record.LeasePath)
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		return true, nil
+	}
+	_ = lock.Close()
+	return false, nil
+}
+
+func removeStaleSession(record broker.SessionRecord) {
+	_ = os.Remove(record.RecordPath)
+	_ = os.Remove(record.LeasePath)
+}
+
+func projectIgnores(root string, configured []string) ([]string, error) {
+	file, err := os.Open(filepath.Join(root, ".pwnbridgeignore"))
+	if errors.Is(err, os.ErrNotExist) {
+		return parseIgnores(nil, configured)
 	}
 	if err != nil {
 		return nil, err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	defer file.Close()
+	const maximumIgnoreBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(file, maximumIgnoreBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maximumIgnoreBytes {
+		return nil, errors.New(".pwnbridgeignore exceeds 1 MiB")
+	}
+	return parseIgnores(data, configured)
+}
+
+func parseIgnores(data []byte, configured []string) ([]string, error) {
+	result := make([]string, 0, len(configured)+16)
+	lines := append(append([]string(nil), configured...), strings.Split(string(data), "\n")...)
+	if len(lines) > 4096 {
+		return nil, errors.New("too many synchronization ignore patterns (maximum 4096)")
+	}
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			result = append(result, line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
+		if len(line) > 4096 || strings.IndexByte(line, 0) >= 0 || strings.ContainsAny(line, "\r\n") {
+			return nil, errors.New("invalid synchronization ignore pattern")
+		}
+		result = append(result, line)
 	}
 	return result, nil
 }
@@ -1381,28 +1551,6 @@ func containsString(values []string, wanted string) bool {
 	}
 	return false
 }
-func terminalLayout(terminal config.Terminal) (string, string) {
-	placement, size := terminal.Placement, terminal.Size
-	if terminal.Provider == "zellij" {
-		if terminal.Zellij.Floating {
-			placement = "floating"
-		} else if placement == "right" || placement == "down" {
-			placement = terminal.Zellij.Direction
-		}
-	}
-	if terminal.Provider == "tmux" {
-		if placement == "right" || placement == "down" {
-			switch terminal.Tmux.Direction {
-			case "vertical", "down":
-				placement = "down"
-			default:
-				placement = "right"
-			}
-		}
-		size = terminal.Tmux.Size
-	}
-	return placement, size
-}
 func remoteShellPath(value string) string {
 	if strings.HasPrefix(value, "~/") {
 		return `"$HOME"/` + shellQuote(value[2:])
@@ -1410,6 +1558,64 @@ func remoteShellPath(value string) string {
 	return shellQuote(value)
 }
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
+
+func sshCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Env = transport.SafeSSHEnvironment()
+	return cmd
+}
+
+func rejectSymlinkParents(root, rel string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return errors.New("workspace root is not a real directory")
+	}
+	parent := filepath.Dir(rel)
+	if parent == "." {
+		return nil
+	}
+	current := root
+	for _, component := range strings.Split(parent, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		info, err = os.Lstat(current)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("parent %s is a symbolic link", current)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("parent %s is not a directory", current)
+		}
+	}
+	return nil
+}
+
+func remoteSymlinkParentCheck(root, rel string) string {
+	paths := []string{strings.TrimRight(root, "/")}
+	parent := filepath.ToSlash(filepath.Dir(rel))
+	if parent != "." {
+		current := strings.TrimRight(root, "/")
+		for _, component := range strings.Split(parent, "/") {
+			current += "/" + component
+			paths = append(paths, current)
+		}
+	}
+	checks := make([]string, 0, len(paths))
+	for _, path := range paths {
+		quoted := remoteShellPath(path)
+		checks = append(checks,
+			"if test -L "+quoted+"; then printf 'symbolic-link parent\\n'; exit 40; fi; "+
+				"if test -e "+quoted+" && test ! -d "+quoted+"; then printf 'non-directory parent\\n'; exit 41; fi")
+	}
+	return "set -eu; " + strings.Join(checks, "; ")
+}
 
 func copyPath(source, destination string) error {
 	info, err := os.Lstat(source)

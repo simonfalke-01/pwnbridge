@@ -3,8 +3,8 @@ set -eu
 
 : "${PWNBRIDGE_E2E_SSH_CONFIG:?set PWNBRIDGE_E2E_SSH_CONFIG to a Lima SSH config}"
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
-TMP="/tmp/pwnbridge-pwndbg-e2e-$$"
-mkdir -p "$TMP/challenge" "$TMP/provider-logs"
+TMP="/tmp/pwnbridge-no-forward-e2e-$$"
+mkdir -p "$TMP/challenge"
 cleanup() {
     if [ -d "$TMP/challenge" ]; then
         (cd "$TMP/challenge" && "$ROOT/bin/pwnbridge" clean --remote --yes >/dev/null 2>&1) || true
@@ -20,36 +20,33 @@ export XDG_DATA_HOME="$TMP/data"
 export XDG_CACHE_HOME="$TMP/cache"
 export PATH="$ROOT/test/e2e/bin:$PATH"
 export PWNBRIDGE_AGENT_PATH="$ROOT/bin/pwnbridge-agent-linux-amd64"
-export PWNBRIDGE_E2E_PROVIDER_LOG="$TMP/provider-logs"
+export PWNBRIDGE_E2E_ROOT="$ROOT"
+export PWNBRIDGE_E2E_DISABLE_FORWARDING=1
 
 cp "$ROOT/../ret2win" "$TMP/challenge/ret2win"
 chmod +x "$TMP/challenge/ret2win"
-cat > "$TMP/challenge/solve-pwndbg.py" <<'PY'
+cat > "$TMP/challenge/solve-remote-mux.py" <<'PY'
 from pwn import *
 
-context.gdb_binary = "pwndbg"
 io = gdb.debug("./ret2win", gdbscript="continue\nquit")
 io.sendline(b"AAAA")
-assert b"x86_64" in io.recvall(timeout=30)
+assert b"x86_64" in io.recvall(timeout=10)
+print("REMOTE_MUX_GDB_OK", flush=True)
 PY
 
 cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" host add lima lima-pwn
 "$ROOT/bin/pwnbridge" host use lima
-"$ROOT/bin/pwnbridge" host bootstrap lima --profile pwn --with-pwndbg >/dev/null
-sed -i.bak "s/provider = 'auto'/provider = 'custom:e2e'/" "$XDG_CONFIG_HOME/pwnbridge/config.toml"
-"$ROOT/bin/pwnbridge" run -- python solve-pwndbg.py
-python3 - "$TMP/provider-logs" <<'PY'
-import glob
-import os
-import re
-import sys
+if ! output=$("$ROOT/bin/pwnbridge" run -- uname -m 2>&1); then
+    printf '%s\n' "$output" >&2
+    exit 1
+fi
+printf '%s\n' "$output" | grep -q x86_64
+printf '%s\n' "$output" | grep -q 'debugger host panes are unavailable'
 
-paths = glob.glob(os.path.join(sys.argv[1], "pane-*.log"))
-assert len(paths) == 1, paths
-data = open(paths[0], "rb").read().decode("utf-8", "replace")
-plain = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", data)
-assert "pwndbg: loaded" in plain, plain[-12000:]
-assert "GEF for linux ready" not in plain, plain[-12000:]
-PY
+# The explicit remote multiplexer scope needs no reverse broker at all, so
+# pwntools GDB remains fully usable under the same forwarding prohibition.
+sed -i.bak "s/provider = 'auto'/provider = 'remote-tmux'/" "$XDG_CONFIG_HOME/pwnbridge/config.toml"
+sed -i.bak "s/scope = 'host'/scope = 'remote'/" "$XDG_CONFIG_HOME/pwnbridge/config.toml"
+expect "$ROOT/test/e2e/lima-remote-mux.exp"
 "$ROOT/bin/pwnbridge" clean --remote --yes

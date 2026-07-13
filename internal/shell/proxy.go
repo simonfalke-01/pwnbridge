@@ -74,6 +74,7 @@ func (p Proxy) Run(ctx context.Context, cmd *exec.Cmd) error {
 			if n > 0 {
 				for _, event := range parser.Feed(buffer[:n]) {
 					if event.Prompt {
+						controller.BeginPrompt()
 						if err := p.Barrier(ctx); err != nil {
 							fmt.Fprintf(p.Err, "\r\npwnbridge: post-command sync blocked: %v\r\n", err)
 						}
@@ -129,11 +130,17 @@ type inputController struct {
 	barrier  Barrier
 	err      io.Writer
 	atPrompt bool
+	syncing  bool
 	pending  []byte
 }
 
 func (c *inputController) Input(ctx context.Context, data []byte) {
 	c.mu.Lock()
+	if c.syncing {
+		c.pending = append(c.pending, data...)
+		c.mu.Unlock()
+		return
+	}
 	if !c.atPrompt {
 		_, _ = c.pty.Write(data)
 		c.mu.Unlock()
@@ -145,18 +152,22 @@ func (c *inputController) Input(ctx context.Context, data []byte) {
 		}
 		_, _ = c.pty.Write(data[:index])
 		rest := append([]byte(nil), data[index+1:]...)
+		c.pending = append(c.pending, rest...)
+		c.syncing = true
 		c.mu.Unlock()
-		if err := c.barrier(ctx); err != nil {
-			fmt.Fprintf(c.err, "\r\npwnbridge: execution blocked by sync barrier: %v\r\n", err)
+		barrierErr := c.barrier(ctx)
+		if barrierErr != nil {
+			fmt.Fprintf(c.err, "\r\npwnbridge: execution blocked by sync barrier: %v\r\n", barrierErr)
 			c.mu.Lock()
-			c.pending = append(c.pending, rest...)
+			c.syncing = false
+			c.atPrompt = true
 			c.mu.Unlock()
 			return
 		}
 		c.mu.Lock()
 		_, _ = c.pty.Write([]byte{value})
+		c.syncing = false
 		c.atPrompt = false
-		c.pending = append(c.pending, rest...)
 		c.mu.Unlock()
 		return
 	}
@@ -164,8 +175,16 @@ func (c *inputController) Input(ctx context.Context, data []byte) {
 	c.mu.Unlock()
 }
 
+func (c *inputController) BeginPrompt() {
+	c.mu.Lock()
+	c.syncing = true
+	c.atPrompt = false
+	c.mu.Unlock()
+}
+
 func (c *inputController) Prompt(ctx context.Context) {
 	c.mu.Lock()
+	c.syncing = false
 	c.atPrompt = true
 	pending := append([]byte(nil), c.pending...)
 	c.pending = nil

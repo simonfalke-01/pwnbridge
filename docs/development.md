@@ -21,8 +21,9 @@ make fuzz-smoke FUZZTIME=15s
 make security
 ```
 
-Fuzz targets cover strict TOML, framed JSON protocol, PTY prompt markers, and
-Mutagen health JSON. CI runs each target independently.
+Fuzz targets cover strict TOML, framed JSON protocol, PTY prompt markers,
+Mutagen health JSON, ignore parsing, and workspace slug generation. CI runs
+each target independently.
 
 Security checks use pinned govulncheck and gosec versions. Gosec exclusions are
 limited to categories that are architectural false positives here: structured
@@ -65,12 +66,15 @@ Individual scenarios:
 |---|---|
 | `lima.sh` | real ret2win, x86-64, artifacts, conflicts/spaces, root deletion |
 | `lima-shell.sh` | save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
+| `lima-disconnect.sh` | forced SSH-master loss, terminal restoration, reconnect, preserved data |
 | `lima-gdb.sh` | debug, attach, API, concurrent panes, selectable host provider |
+| `lima-gdb-tui.sh` | real GDB TUI PTY and 30x90 to 45x120 resize propagation |
 | `lima-pwntools-dev.sh` | pinned current pwntools 5-dev behavior |
 | `lima-pwndbg.sh` | isolated optional Pwndbg executable |
 | `lima-container.sh` | basic Podman runtime and artifact sync |
 | `lima-container-gdb.sh` | debug/attach/API in one container namespace |
 | `lima-remote-mux.sh` | explicit visible remote tmux pane |
+| `lima-no-forward.sh` | ordinary fallback plus remote-mux GDB when reverse forwarding is prohibited |
 | `lima-stop.sh` | live-process signal, exit 130, final flush/pause |
 
 The full container GDB test expects an image tagged

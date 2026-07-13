@@ -69,7 +69,7 @@ func (r CommandRunner) Run(ctx context.Context, args ...string) ([]byte, error) 
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, r.Path, args...)
-	cmd.Env = append(os.Environ(), "MUTAGEN_DATA_DIRECTORY="+dataDir)
+	cmd.Env = commandEnvironment(dataDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("%s %s: %w: %s", r.Path, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -97,7 +97,7 @@ func (r CommandRunner) StartDaemon(ctx context.Context) error {
 		return err
 	}
 	cmd := exec.Command(r.Path, "daemon", "run")
-	cmd.Env = append(os.Environ(), "MUTAGEN_DATA_DIRECTORY="+dataDir)
+	cmd.Env = commandEnvironment(dataDir)
 	cmd.Stdin = nil
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -109,6 +109,23 @@ func (r CommandRunner) StartDaemon(ctx context.Context) error {
 	_ = cmd.Process.Release()
 	_ = logFile.Close()
 	return nil
+}
+
+func commandEnvironment(dataDir string) []string {
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(key)
+		if strings.HasPrefix(upper, "TMUX") || strings.HasPrefix(upper, "ZELLIJ") {
+			continue
+		}
+		switch upper {
+		case "MUTAGEN_DATA_DIRECTORY", "PWNBRIDGE_BROKER", "PWNBRIDGE_BROKER_TOKEN", "PWNBRIDGE_SESSION_ID", "PWNBRIDGE_SESSION_DIR", "PWNBRIDGE_RUNTIME":
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment, "MUTAGEN_DATA_DIRECTORY="+dataDir)
 }
 
 func (r CommandRunner) effectiveDataDir() (string, error) {

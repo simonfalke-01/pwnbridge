@@ -19,6 +19,7 @@ import (
 	"github.com/pwnbridge/pwnbridge/internal/fsutil"
 	"github.com/pwnbridge/pwnbridge/internal/protocol"
 	"github.com/pwnbridge/pwnbridge/internal/terminal/provider"
+	"github.com/pwnbridge/pwnbridge/internal/transport"
 	"github.com/pwnbridge/pwnbridge/internal/version"
 )
 
@@ -26,31 +27,43 @@ const MaxPanes = 8
 const maxOpenRequestsPerMinute = 32
 
 type SessionRecord struct {
-	Schema           int                  `json:"schema"`
-	OwnerPID         int                  `json:"owner_pid"`
-	ID               string               `json:"id"`
-	Token            string               `json:"token"`
-	LocalSocket      string               `json:"local_socket"`
-	LocalTCP         string               `json:"local_tcp,omitempty"`
-	RemoteSocket     string               `json:"remote_socket"`
-	ControlPath      string               `json:"control_path"`
-	Destination      string               `json:"destination"`
-	AgentPath        string               `json:"agent_path"`
-	RemoteSessionDir string               `json:"remote_session_dir"`
-	LocalWorkspace   string               `json:"local_workspace"`
-	Executable       string               `json:"executable"`
-	RecordPath       string               `json:"record_path"`
-	Provider         string               `json:"provider"`
-	Placement        string               `json:"placement"`
-	Size             string               `json:"size"`
-	Focus            bool                 `json:"focus"`
-	CloseOnSuccess   bool                 `json:"close_on_success"`
-	HoldOnFailure    bool                 `json:"hold_on_failure"`
-	Runtime          protocol.RuntimeSpec `json:"runtime"`
+	Schema                int                  `json:"schema"`
+	OwnerPID              int                  `json:"owner_pid"`
+	ID                    string               `json:"id"`
+	Token                 string               `json:"token"`
+	LocalSocket           string               `json:"local_socket"`
+	LocalTCP              string               `json:"local_tcp,omitempty"`
+	RemoteSocket          string               `json:"remote_socket"`
+	ControlPath           string               `json:"control_path"`
+	Destination           string               `json:"destination"`
+	AgentPath             string               `json:"agent_path"`
+	RemoteSessionDir      string               `json:"remote_session_dir"`
+	LocalWorkspace        string               `json:"local_workspace"`
+	Executable            string               `json:"executable"`
+	RecordPath            string               `json:"record_path"`
+	LeasePath             string               `json:"lease_path"`
+	Provider              string               `json:"provider"`
+	Placement             string               `json:"placement"`
+	Size                  string               `json:"size"`
+	Focus                 bool                 `json:"focus"`
+	CloseOnSuccess        bool                 `json:"close_on_success"`
+	HoldOnFailure         bool                 `json:"hold_on_failure"`
+	ZellijNearCurrentPane bool                 `json:"zellij_near_current_pane"`
+	ZellijDirection       string               `json:"zellij_direction"`
+	ZellijFloating        bool                 `json:"zellij_floating"`
+	TmuxDirection         string               `json:"tmux_direction"`
+	TmuxSize              string               `json:"tmux_size"`
+	Runtime               protocol.RuntimeSpec `json:"runtime"`
 }
 
 func SaveSession(path string, record SessionRecord) error {
 	record.Schema = 1
+	if record.RecordPath == "" {
+		record.RecordPath = path
+	}
+	if record.LeasePath == "" {
+		record.LeasePath = path + ".lease"
+	}
 	return fsutil.WriteJSON(path, record)
 }
 
@@ -59,7 +72,8 @@ func LoadSession(path string) (SessionRecord, error) {
 	if err := fsutil.ReadJSON(path, &record); err != nil {
 		return record, err
 	}
-	if record.Schema != 1 || record.OwnerPID <= 0 || !validID(record.ID) || len(record.Token) < 32 || !validRuntime(record) {
+	if record.Schema != 1 || record.OwnerPID <= 0 || !validID(record.ID) || len(record.Token) < 32 ||
+		record.RecordPath != path || record.LeasePath != path+".lease" || !validRuntime(record) {
 		return record, errors.New("invalid broker session record")
 	}
 	return record, nil
@@ -248,7 +262,7 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 		}
 	}
 
-	terminalProvider, _, err := b.Registry.Select(context.Background(), b.Record.Provider)
+	terminalProvider, capabilities, err := b.Registry.Select(context.Background(), b.Record.Provider)
 	if err != nil {
 		b.fail(open.RequestID, err)
 		return
@@ -258,11 +272,21 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 		b.fail(open.RequestID, errors.New("invalid debugger metadata"))
 		return
 	}
+	placement, size := brokerLayout(b.Record, capabilities.Name)
+	if !contains(capabilities.Placements, placement) {
+		if len(capabilities.Placements) == 1 && capabilities.Placements[0] == "window" {
+			placement = "window"
+		} else {
+			b.fail(open.RequestID, fmt.Errorf("terminal provider %s does not support %s placement", capabilities.Name, placement))
+			return
+		}
+	}
 	spec := provider.Spec{
 		SessionID: b.Record.ID, RequestID: open.RequestID, Cwd: b.Record.LocalWorkspace,
-		Title: safeTitle(payload.Title), Placement: b.Record.Placement, Size: b.Record.Size, Focus: b.Record.Focus,
+		Title: safeTitle(payload.Title), Placement: placement, Size: size, Focus: b.Record.Focus,
 		CloseOnSuccess: b.Record.CloseOnSuccess, HoldOnFailure: b.Record.HoldOnFailure,
-		Command: []string{b.Record.Executable, "__pane", "--record", b.Record.RecordPath, "--session", b.Record.ID, "--request", open.RequestID},
+		NearCurrentPane: b.Record.ZellijNearCurrentPane,
+		Command:         []string{b.Record.Executable, "__pane", "--record", b.Record.RecordPath, "--session", b.Record.ID, "--request", open.RequestID},
 	}
 	handle, err := terminalProvider.Open(context.Background(), spec)
 	if err != nil {
@@ -270,9 +294,17 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 		return
 	}
 	b.mu.Lock()
+	if b.requests[open.RequestID] != req {
+		b.mu.Unlock()
+		_ = terminalProvider.Close(context.Background(), handle)
+		return
+	}
 	req.provider, req.handle = terminalProvider, handle
 	b.mu.Unlock()
-	_ = p.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "opened", SessionID: b.Record.ID, RequestID: open.RequestID, Token: b.Record.Token})
+	if err := p.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "opened", SessionID: b.Record.ID, RequestID: open.RequestID, Token: b.Record.Token}); err != nil {
+		b.cancel(open.RequestID, "pwntools parent disconnected while opening debugger")
+		return
+	}
 
 	for {
 		var message protocol.Message
@@ -386,7 +418,10 @@ func (b *Broker) validate(message protocol.Message) error {
 }
 
 func errorMessage(request protocol.Message, err error) protocol.Message {
-	return protocol.Message{Protocol: version.ProtocolVersion, Type: "error", SessionID: request.SessionID, RequestID: request.RequestID, Payload: protocol.Payload(protocol.ExitPayload{Code: 1, Error: err.Error()})}
+	// Echo only the credential supplied by the peer. A valid client can
+	// authenticate an error response, while an invalid client learns nothing
+	// it did not already send.
+	return protocol.Message{Protocol: version.ProtocolVersion, Type: "error", SessionID: request.SessionID, RequestID: request.RequestID, Token: request.Token, Payload: protocol.Payload(protocol.ExitPayload{Code: 1, Error: err.Error()})}
 }
 
 func safeTitle(value string) string {
@@ -403,6 +438,39 @@ func safeTitle(value string) string {
 		return "pwntools GDB"
 	}
 	return value
+}
+
+func brokerLayout(record SessionRecord, providerName string) (string, string) {
+	placement, size := record.Placement, record.Size
+	switch providerName {
+	case "zellij":
+		if record.ZellijFloating {
+			placement = "floating"
+		} else if placement == "right" || placement == "down" {
+			placement = record.ZellijDirection
+		}
+	case "tmux":
+		if placement == "right" || placement == "down" {
+			if record.TmuxDirection == "vertical" || record.TmuxDirection == "down" {
+				placement = "down"
+			} else {
+				placement = "right"
+			}
+		}
+		if record.TmuxSize != "" {
+			size = record.TmuxSize
+		}
+	}
+	return placement, size
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func RunPane(ctx context.Context, record SessionRecord, requestID string) error {
@@ -426,26 +494,29 @@ func RunPane(ctx context.Context, record SessionRecord, requestID string) error 
 	}
 	remote := remoteAgentCommand(record.AgentPath, "pane", encoded)
 	cmd := exec.CommandContext(ctx, "ssh", "-S", record.ControlPath, "-tt", "-e", "none", record.Destination, remote)
+	cmd.Env = transport.SafeSSHEnvironment()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	wasCancelled := false
 	if err = cmd.Start(); err == nil {
 		wait := make(chan error, 1)
 		go func() { wait <- cmd.Wait() }()
-		cancelled := make(chan error, 1)
+		cancelMessage := make(chan error, 1)
 		go func() {
 			var message protocol.Message
 			if decodeErr := protocol.Decode(conn, &message); decodeErr != nil {
-				cancelled <- decodeErr
+				cancelMessage <- decodeErr
 				return
 			}
 			if message.Protocol != version.ProtocolVersion || message.SessionID != record.ID || message.RequestID != requestID || message.Token != record.Token || message.Type != "cancel" {
-				cancelled <- errors.New("invalid pane cancellation message")
+				cancelMessage <- errors.New("invalid pane cancellation message")
 				return
 			}
-			cancelled <- errors.New("debugger pane cancelled")
+			cancelMessage <- errors.New("debugger pane cancelled")
 		}()
 		select {
 		case err = <-wait:
-		case cancelErr := <-cancelled:
+		case cancelErr := <-cancelMessage:
+			wasCancelled = true
 			err = cancelErr
 			if cmd.Process != nil {
 				_ = cmd.Process.Signal(os.Interrupt)
@@ -459,6 +530,7 @@ func RunPane(ctx context.Context, record SessionRecord, requestID string) error 
 				<-wait
 			}
 		case <-ctx.Done():
+			wasCancelled = true
 			err = ctx.Err()
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
@@ -474,9 +546,20 @@ func RunPane(ctx context.Context, record SessionRecord, requestID string) error 
 			code = exit.ExitCode()
 		}
 	}
-	if err != nil && record.HoldOnFailure && term.IsTerminal(int(os.Stdin.Fd())) {
+	// A user-requested hold is useful for an actual debugger failure, but must
+	// never turn session shutdown/SIGTERM into an immortal pane waiting on
+	// stdin. main's signal context is authoritative for cancellation.
+	if err != nil && !wasCancelled && record.HoldOnFailure && ctx.Err() == nil && term.IsTerminal(int(os.Stdin.Fd())) {
 		fmt.Fprintln(os.Stderr, "\npwnbridge: debugger failed; press Enter to close this pane")
-		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		entered := make(chan struct{})
+		go func() {
+			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+			close(entered)
+		}()
+		select {
+		case <-entered:
+		case <-ctx.Done():
+		}
 	}
 	_ = peer.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "exited", SessionID: record.ID, RequestID: requestID, Token: record.Token, Payload: protocol.Payload(protocol.ExitPayload{Code: code, Error: errorText(err)})})
 	_ = conn.SetDeadline(time.Now().Add(100 * time.Millisecond))
@@ -500,6 +583,9 @@ func Ping(record SessionRecord) error {
 	}
 	if response.Type != "pong" {
 		return errors.New("unexpected broker ping response")
+	}
+	if response.Protocol != version.ProtocolVersion || response.SessionID != record.ID || response.Token != record.Token {
+		return errors.New("broker ping response identity mismatch")
 	}
 	return nil
 }

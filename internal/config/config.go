@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -256,10 +257,14 @@ func Load(cwd string, p paths.Paths) (Effective, error) {
 		}
 	}
 	if e.Project.Workspace.Root != "." {
-		root = filepath.Join(root, e.Project.Workspace.Root)
-		root, err = filepath.EvalSymlinks(root)
+		base := root
+		root, err = filepath.EvalSymlinks(filepath.Join(base, e.Project.Workspace.Root))
 		if err != nil {
 			return Effective{}, fmt.Errorf("resolve workspace root: %w", err)
+		}
+		relative, relErr := filepath.Rel(base, root)
+		if relErr != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return Effective{}, errors.New("workspace.root resolves outside the project directory")
 		}
 		e.ProjectRoot = root
 	}
@@ -543,6 +548,20 @@ func (e Effective) Validate() error {
 	if e.Project.Shell.Command != "bash" {
 		problems = append(problems, "shell.command must be bash")
 	}
+	if e.Project.Environment.Profile != "pwn" {
+		problems = append(problems, "environment.profile must be pwn")
+	}
+	for key, value := range e.Project.Environment.Set {
+		if !validEnvironmentName(key) {
+			problems = append(problems, fmt.Sprintf("environment.set key %q is invalid", key))
+		}
+		if strings.HasPrefix(strings.ToUpper(key), "PWNBRIDGE_") {
+			problems = append(problems, fmt.Sprintf("environment.set key %q uses the reserved PWNBRIDGE_ prefix", key))
+		}
+		if len(value) > 64*1024 || strings.IndexByte(value, 0) >= 0 {
+			problems = append(problems, fmt.Sprintf("environment.set value for %q is invalid", key))
+		}
+	}
 	if e.Project.Runtime.Kind != "host" && e.Project.Runtime.Kind != "container" {
 		problems = append(problems, "runtime.kind must be host or container")
 	}
@@ -557,8 +576,9 @@ func (e Effective) Validate() error {
 		if unsafeArgument(container.Image, 512) {
 			problems = append(problems, "runtime.container.image contains unsafe characters")
 		}
-		if container.Workdir == "" || !strings.HasPrefix(container.Workdir, "/") || strings.ContainsRune(container.Workdir, 0) {
-			problems = append(problems, "runtime.container.workdir must be an absolute container path")
+		cleanWorkdir := path.Clean(container.Workdir)
+		if cleanWorkdir != "/work" && !strings.HasPrefix(cleanWorkdir, "/work/") {
+			problems = append(problems, "runtime.container.workdir must be /work or a directory beneath /work")
 		}
 		if unsafeArgument(container.Network, 128) {
 			problems = append(problems, "runtime.container.network contains unsafe characters")
@@ -585,6 +605,12 @@ func (e Effective) Validate() error {
 		if host.Platform != "linux/amd64" {
 			problems = append(problems, fmt.Sprintf("hosts.%s.platform must be linux/amd64", name))
 		}
+		if host.WorkspaceRoot != "" && !validRemoteWorkspaceRoot(host.WorkspaceRoot) {
+			problems = append(problems, fmt.Sprintf("hosts.%s.workspace_root must be a safe ~/... or absolute path", name))
+		}
+		if host.BootstrapProfile != "" && host.BootstrapProfile != "pwn" {
+			problems = append(problems, fmt.Sprintf("hosts.%s.bootstrap_profile must be pwn", name))
+		}
 	}
 	if len(problems) > 0 {
 		sort.Strings(problems)
@@ -606,6 +632,38 @@ func ValidHostName(name string) bool {
 		}
 	}
 	return true
+}
+
+func validEnvironmentName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for index, r := range name {
+		if index == 0 && !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z') {
+			return false
+		}
+		if index > 0 && !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validRemoteWorkspaceRoot(value string) bool {
+	if len(value) > 512 || strings.Contains(value, ":") {
+		return false
+	}
+	for _, r := range value {
+		if r == 0 || r < 32 || r == 127 {
+			return false
+		}
+	}
+	if strings.HasPrefix(value, "~/") {
+		relative := path.Clean(strings.TrimPrefix(value, "~/"))
+		return relative != "." && relative != ".." && !strings.HasPrefix(relative, "../") && !path.IsAbs(relative)
+	}
+	clean := path.Clean(value)
+	return path.IsAbs(clean) && clean != "/"
 }
 
 func oneOf(value string, allowed ...string) bool {
