@@ -261,7 +261,7 @@ func shellCommand(args []string) error {
 		return err
 	}
 	rcPath := filepath.Join(sessionDir, "bashrc")
-	if err := writeBashRC(rcPath, request.Nonce, request.SourceUserRC); err != nil {
+	if err := writeBashRC(rcPath, request.Nonce, request.PromptHost, request.PromptPath, request.SourceUserRC); err != nil {
 		return err
 	}
 	request.Runtime.Workspace = request.Cwd
@@ -594,9 +594,12 @@ func replaceProcess(cmd *exec.Cmd) error {
 	return syscall.Exec(path, cmd.Args, cmd.Env)
 }
 
-func writeBashRC(path, nonce string, sourceUser bool) error {
+func writeBashRC(path, nonce, promptHost, promptPath string, sourceUser bool) error {
 	if !validID(nonce) {
 		return errors.New("invalid shell marker nonce")
+	}
+	if !validPromptComponent(promptHost) || !validPromptComponent(promptPath) {
+		return errors.New("invalid managed shell prompt")
 	}
 	var source string
 	if sourceUser {
@@ -614,8 +617,21 @@ if [ -n "${PROMPT_COMMAND-}" ]; then
 else
     PROMPT_COMMAND="__pwnbridge_prompt_marker"
 fi
+PS1=` + shellSingleQuote(`\[\e[1;32m\][pwnbridge:`+promptHost+`]\[\e[0m\] \[\e[1;34m\]`+promptPath+`\[\e[0m\] \$ `) + `
 `
 	return fsutil.AtomicWrite(path, []byte(content), 0o600)
+}
+
+func validPromptComponent(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func installWrapper(target string) error {

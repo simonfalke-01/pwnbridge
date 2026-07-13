@@ -34,6 +34,26 @@ func TestRequestRejectsTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestManagedBashRCHasConciseSafePrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bashrc")
+	if err := writeBashRC(path, "0123456789abcdef", "lima-x86", "ret2win", true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	for _, wanted := range []string{`[pwnbridge:lima-x86]`, `ret2win`, `PROMPT_COMMAND`, `$HOME/.bashrc`} {
+		if !strings.Contains(content, wanted) {
+			t.Fatalf("generated bashrc is missing %q:\n%s", wanted, content)
+		}
+	}
+	if err := writeBashRC(path, "0123456789abcdef", "bad;host", "ret2win", false); err == nil {
+		t.Fatal("unsafe prompt component was accepted")
+	}
+}
+
 func TestEnvironmentFilter(t *testing.T) {
 	got := filteredEnvironment([]string{"PATH=/x", "LD_PRELOAD=a", "SSH_TTY=/dev/x", "ZELLIJ=1", "TERM=xterm", "A=b"})
 	if got["PATH"] != "/x" || got["LD_PRELOAD"] != "a" || got["A"] != "b" {

@@ -109,6 +109,8 @@ func TestSafeSSHEnvironmentRemovesLocalMuxAndBrokerState(t *testing.T) {
 	t.Setenv("ZELLIJ_SESSION_NAME", "local")
 	t.Setenv("PWNBRIDGE_BROKER_TOKEN", "secret")
 	t.Setenv("PWNBRIDGE_E2E_SSH_CONFIG", "/tmp/test-config")
+	t.Setenv("LANG", "en_SG.UTF-8")
+	t.Setenv("LC_CTYPE", "en_SG.UTF-8")
 	values := map[string]string{}
 	for _, entry := range SafeSSHEnvironment() {
 		key, value, ok := strings.Cut(entry, "=")
@@ -116,7 +118,7 @@ func TestSafeSSHEnvironmentRemovesLocalMuxAndBrokerState(t *testing.T) {
 			values[key] = value
 		}
 	}
-	for _, forbidden := range []string{"TMUX", "TMUX_PANE", "ZELLIJ", "ZELLIJ_SESSION_NAME", "PWNBRIDGE_BROKER_TOKEN"} {
+	for _, forbidden := range []string{"TMUX", "TMUX_PANE", "ZELLIJ", "ZELLIJ_SESSION_NAME", "PWNBRIDGE_BROKER_TOKEN", "LANG", "LC_CTYPE"} {
 		if _, ok := values[forbidden]; ok {
 			t.Fatalf("%s leaked into SSH environment", forbidden)
 		}

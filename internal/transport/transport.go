@@ -153,7 +153,6 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 	remote := dir + "/pwnbridge-agent"
 	check := "test -x " + shellQuote(remote) + " && test \"$(sha256sum " + shellQuote(remote) + " | cut -d' ' -f1)\" = " + shellQuote(digest) + " && printf present"
 	if out, _ := c.run(ctx, "-T", c.Destination, check); strings.TrimSpace(string(out)) == "present" {
-		c.pruneAgents(ctx, filepath.Dir(dir), dir)
 		return remote, nil
 	}
 	cache := probe.Home + "/.cache/pwnbridge"
@@ -191,17 +190,13 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 
 func (c Client) pruneAgents(ctx context.Context, root, current string) {
 	script := "root=" + shellQuote(root) + "; current=" + shellQuote(current) + `; count=0
+running=$(find /proc/[0-9]*/exe -printf '%l\n' 2>/dev/null || true)
 find "$root" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -nr | while read -r stamp path; do
   base=${path##*/}
   case "$base" in ''|*[!0-9a-f]*) continue ;; esac
   [ "${#base}" -eq 64 ] || continue
   [ "$path" = "$current" ] && continue
-  in_use=false
-  for exe in /proc/[0-9]*/exe; do
-    target=$(readlink "$exe" 2>/dev/null || true)
-    case "$target" in "$path"/*) in_use=true; break ;; esac
-  done
-  [ "$in_use" = true ] && continue
+  case "$running" in *"$path/"*) continue ;; esac
   count=$((count+1))
   [ "$count" -le 2 ] || rm -rf -- "$path"
 done`
@@ -407,6 +402,9 @@ func SafeSSHEnvironment() []string {
 			continue
 		}
 		if key == "TMUX" || strings.HasPrefix(key, "TMUX_") || key == "ZELLIJ" || strings.HasPrefix(key, "ZELLIJ_") {
+			continue
+		}
+		if key == "LANG" || key == "LANGUAGE" || strings.HasPrefix(key, "LC_") {
 			continue
 		}
 		switch key {

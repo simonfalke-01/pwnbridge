@@ -375,10 +375,16 @@ func (s *activeSession) environment() map[string]string {
 		termName = "xterm-256color"
 	}
 	env["TERM"] = termName
-	for _, key := range []string{"COLORTERM", "LANG", "LC_ALL"} {
+	for _, key := range []string{"COLORTERM"} {
 		if value := os.Getenv(key); value != "" {
 			env[key] = value
 		}
+	}
+	if _, configured := env["LANG"]; !configured {
+		env["LANG"] = "C.UTF-8"
+	}
+	if _, configured := env["LC_ALL"]; !configured {
+		env["LC_ALL"] = "C.UTF-8"
 	}
 	return env
 }
@@ -457,7 +463,7 @@ func (a *App) shell(ctx context.Context) (result error) {
 			result = errors.Join(result, closeErr)
 		}
 	}()
-	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
+	request := protocol.ShellRequest{Cwd: p.WS.RemotePath, Shell: p.Config.Project.Shell.Command, SourceUserRC: p.Config.Project.Shell.SourceUserRC, Nonce: session.Nonce, SessionID: session.ID, PromptHost: p.HostID, PromptPath: p.WS.Slug, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
 	encoded, err := agent.EncodeRequest(request)
 	if err != nil {
 		return err
