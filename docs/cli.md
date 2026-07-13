@@ -131,11 +131,14 @@ selected host, and executable paths.
 
 ```text
 pwnbridge completion bash|zsh|fish
+pwnbridge --version
 pwnbridge version [--json]
 ```
 
-Version JSON includes product version, commit, build date, agent protocol,
-config schema, and required Mutagen version.
+`--version` (or `-v`) prints the human-readable product version, commit, and
+build date. The `version` command prints the same line and additionally accepts
+`--json`; version JSON includes the agent protocol, config schema, and required
+Mutagen version.
 
 Every project-aware command accepts global `--host NAME` as a non-persistent
 selection override.

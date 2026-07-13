@@ -62,6 +62,7 @@ and shell completions in one command:
 
 ```console
 brew install simonfalke-01/pwnbridge/pwnbridge
+pwnbridge --version
 ```
 
 Or build from source:
@@ -107,6 +108,7 @@ Then register and prepare it:
 
 ```console
 pwnbridge host add x86 pwnbox
+pwnbridge host default x86
 pwnbridge host doctor x86
 pwnbridge host bootstrap x86 --profile pwn
 ```
@@ -136,8 +138,12 @@ owned by the SSH user. Bootstrap is idempotent, and future client upgrades
 deploy a new content-addressed agent automatically—no `scp`, remote login,
 system-wide Pwnbridge binary, or persistent daemon is required.
 
-Host selection is project-local, so change into the challenge directory before
-binding it. No per-challenge config file is required:
+The host registry and default are machine-wide. `host default NAME` changes the
+fallback used by projects without an override. Project selection is local
+state, so change into the challenge directory before `host use NAME`; use
+`host use --default` to remove that override. `host list` marks the machine
+default with `*` and the current project's effective host with `>`. No
+per-challenge config file is required:
 
 ```console
 cd /path/to/challenge

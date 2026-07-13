@@ -105,7 +105,17 @@ pwnbridge host remove NAME
 `host default` changes the machine-wide fallback. `host use NAME` stores a
 local project-to-host binding under XDG state, while `host use --default`
 removes that override. None of these commands put a machine name into the
-project checkout.
+project checkout. `host list` marks the machine default with `*` and the
+current project's effective host with `>`.
+
+Host selection specifically follows this precedence, from lowest to highest:
+
+```text
+global default_host
+→ local project binding
+→ PWNBRIDGE_HOST
+→ --host NAME
+```
 
 `workspace_root` accepts a safe path below the remote home (the portable
 default) or an absolute server-local path such as `/srv/pwnbridge/workspaces`.

@@ -85,6 +85,7 @@ func (a *App) Root() *cobra.Command {
 	}
 	root := &cobra.Command{
 		Use: "pwnbridge", Short: "Make a remote Linux x86-64 pwn environment feel local",
+		Version:      fmt.Sprintf("%s (%s, %s)", version.Version, version.Commit, version.Date),
 		SilenceUsage: true, SilenceErrors: true,
 		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) != 0 {
@@ -94,6 +95,8 @@ func (a *App) Root() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) },
 	}
+	root.SetVersionTemplate("pwnbridge {{.Version}}\n")
+	root.Flags().BoolP("version", "v", false, "version for pwnbridge")
 	root.PersistentFlags().StringVar(&a.HostFlag, "host", "", "override the configured remote host")
 	root.AddCommand(
 		&cobra.Command{Use: "shell", Short: "Open the managed remote shell", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
@@ -152,7 +155,7 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 	effective.SelectedHost = hostID
 	if hostID == "" {
 		if requireHost {
-			return nil, errors.New("no host selected; run `pwnbridge host add NAME DESTINATION` and `pwnbridge host use NAME`")
+			return nil, errors.New("no host selected; run `pwnbridge host add NAME DESTINATION`, then `pwnbridge host default NAME` or `pwnbridge host use NAME`")
 		}
 		mutagen := syncer.Mutagen{Runner: syncer.DefaultRunner(effective.MutagenPath, a.Paths.State)}
 		return &projectContext{Config: effective, Manager: manager, Sync: mutagen}, nil
@@ -808,7 +811,7 @@ func (a *App) hostCommand() *cobra.Command {
 }
 
 func (a *App) hostAdd() *cobra.Command {
-	return &cobra.Command{Use: "add NAME DESTINATION", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "add NAME DESTINATION", Short: "Register a remote host", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
 		e, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -870,7 +873,7 @@ func (a *App) hostList() *cobra.Command {
 
 func (a *App) hostShow() *cobra.Command {
 	var asJSON bool
-	cmd := &cobra.Command{Use: "show NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "show NAME", Short: "Show a configured host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -950,7 +953,7 @@ func (a *App) hostUse() *cobra.Command {
 }
 
 func (a *App) hostRemove() *cobra.Command {
-	return &cobra.Command{Use: "remove NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "remove NAME", Short: "Remove a configured host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -976,7 +979,7 @@ func (a *App) hostRemove() *cobra.Command {
 
 func (a *App) hostDoctor() *cobra.Command {
 	var asJSON bool
-	cmd := &cobra.Command{Use: "doctor NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "doctor NAME", Short: "Check a remote host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -1023,7 +1026,7 @@ func (a *App) hostDoctor() *cobra.Command {
 func (a *App) hostBootstrap() *cobra.Command {
 	var options bootstrap.Options
 	var profile string
-	cmd := &cobra.Command{Use: "bootstrap NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "bootstrap NAME", Short: "Prepare a remote host for pwn work", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if profile != "pwn" {
 			return errors.New("only the pwn bootstrap profile is supported")
 		}
@@ -1097,7 +1100,7 @@ func (a *App) syncCommand() *cobra.Command {
 		return p, report, err
 	}
 	var statusJSON bool
-	statusCmd := &cobra.Command{Use: "status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	statusCmd := &cobra.Command{Use: "status", Short: "Show synchronization status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, report, err := status(cmd.Context())
 		if err != nil {
 			return err
@@ -1113,21 +1116,21 @@ func (a *App) syncCommand() *cobra.Command {
 	}}
 	statusCmd.Flags().BoolVar(&statusJSON, "json", false, "emit JSON")
 	syncCmd.AddCommand(statusCmd,
-		&cobra.Command{Use: "flush", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		&cobra.Command{Use: "flush", Short: "Flush and validate synchronization", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 			p, err := a.loadProject(cmd.Context(), true)
 			if err != nil {
 				return err
 			}
 			return a.barrier(cmd.Context(), p)
 		}},
-		&cobra.Command{Use: "pause", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		&cobra.Command{Use: "pause", Short: "Pause synchronization", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 			p, _, err := status(cmd.Context())
 			if err != nil {
 				return err
 			}
 			return p.Sync.Pause(cmd.Context(), p.State.MutagenIdentifier)
 		}},
-		&cobra.Command{Use: "resume", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		&cobra.Command{Use: "resume", Short: "Resume synchronization", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 			p, _, err := status(cmd.Context())
 			if err != nil {
 				return err
@@ -1136,7 +1139,7 @@ func (a *App) syncCommand() *cobra.Command {
 		}},
 	)
 	var conflictsJSON bool
-	conflicts := &cobra.Command{Use: "conflicts", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	conflicts := &cobra.Command{Use: "conflicts", Short: "List synchronization conflicts", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, report, err := status(cmd.Context())
 		if err != nil {
 			return err
@@ -1160,7 +1163,7 @@ func (a *App) syncCommand() *cobra.Command {
 
 func (a *App) resolveCommand() *cobra.Command {
 	var prefer string
-	cmd := &cobra.Command{Use: "resolve --prefer local|remote -- PATH...", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	cmd := &cobra.Command{Use: "resolve --prefer local|remote -- PATH...", Short: "Resolve synchronization conflicts", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if prefer != "local" && prefer != "remote" {
 			return errors.New("--prefer must be local or remote")
 		}
@@ -1239,7 +1242,7 @@ func (a *App) resolveCommand() *cobra.Command {
 func (a *App) terminalCommand() *cobra.Command {
 	terminal := &cobra.Command{Use: "terminal", Short: "Inspect terminal providers"}
 	var asJSON bool
-	providers := &cobra.Command{Use: "providers", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	providers := &cobra.Command{Use: "providers", Short: "List terminal providers", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		registry := provider.NewRegistry(a.Paths.Cache)
 		results := []provider.Capabilities{}
 		for _, name := range registry.Names() {
@@ -1266,7 +1269,7 @@ func (a *App) terminalCommand() *cobra.Command {
 	}}
 	providers.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
 	var selected, placement, size string
-	test := &cobra.Command{Use: "test", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	test := &cobra.Command{Use: "test", Short: "Test a terminal provider", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		registry := provider.NewRegistry(a.Paths.Cache)
 		p, caps, err := registry.Select(cmd.Context(), selected)
 		if err != nil {
@@ -1293,7 +1296,7 @@ func (a *App) terminalCommand() *cobra.Command {
 func (a *App) runtimeCommand() *cobra.Command {
 	runtimeCmd := &cobra.Command{Use: "runtime", Short: "Inspect or reset execution runtime"}
 	var asJSON bool
-	status := &cobra.Command{Use: "status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	status := &cobra.Command{Use: "status", Short: "Show the execution runtime", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -1306,7 +1309,7 @@ func (a *App) runtimeCommand() *cobra.Command {
 		return nil
 	}}
 	status.Flags().BoolVar(&asJSON, "json", false, "emit JSON")
-	reset := &cobra.Command{Use: "reset", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	reset := &cobra.Command{Use: "reset", Short: "Reset the execution runtime", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := a.loadProject(cmd.Context(), true)
 		if err != nil {
 			return err
@@ -1345,7 +1348,7 @@ func (a *App) runtimeCommand() *cobra.Command {
 
 func (a *App) configCommand() *cobra.Command {
 	configCmd := &cobra.Command{Use: "config", Short: "Inspect configuration"}
-	configCmd.AddCommand(&cobra.Command{Use: "path", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	configCmd.AddCommand(&cobra.Command{Use: "path", Short: "Show configuration paths", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -1358,7 +1361,7 @@ func (a *App) configCommand() *cobra.Command {
 		}
 		return nil
 	}})
-	configCmd.AddCommand(&cobra.Command{Use: "validate", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	configCmd.AddCommand(&cobra.Command{Use: "validate", Short: "Validate effective configuration", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if _, err := a.loadProject(cmd.Context(), false); err != nil {
 			return err
 		}
@@ -1366,7 +1369,7 @@ func (a *App) configCommand() *cobra.Command {
 		return nil
 	}})
 	var effective, asJSON bool
-	show := &cobra.Command{Use: "show", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+	show := &cobra.Command{Use: "show", Short: "Show configuration", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -1390,7 +1393,7 @@ func (a *App) configCommand() *cobra.Command {
 
 func (a *App) versionCommand() *cobra.Command {
 	var asJSON bool
-	cmd := &cobra.Command{Use: "version", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+	cmd := &cobra.Command{Use: "version", Short: "Show version information", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		value := map[string]any{"version": version.Version, "commit": version.Commit, "date": version.Date, "protocol": version.ProtocolVersion, "config_schema": version.ConfigSchema, "mutagen": version.MutagenVersion}
 		if asJSON {
 			return writeJSON(a.Out, value)
@@ -1426,7 +1429,7 @@ func (a *App) paneCommand() *cobra.Command {
 }
 
 func completionCommand(root *cobra.Command) *cobra.Command {
-	return &cobra.Command{Use: "completion [bash|zsh|fish]", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "completion [bash|zsh|fish]", Short: "Generate a shell completion script", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		switch args[0] {
 		case "bash":
 			return root.GenBashCompletion(cmd.OutOrStdout())

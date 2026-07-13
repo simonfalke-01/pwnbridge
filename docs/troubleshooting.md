@@ -14,6 +14,29 @@ pwnbridge config validate
 Use `--json` where supported when collecting structured diagnostics. JSON is
 always wrapped as `{"schema":1,"data":...}`.
 
+## The wrong host is selected
+
+Inspect both selection scopes from the project directory:
+
+```console
+pwnbridge status
+pwnbridge host list
+```
+
+In `host list`, `*` marks the machine-wide default and `>` marks the current
+project's effective host. Change the intended scope explicitly:
+
+```console
+pwnbridge host default remote-x86  # machine-wide fallback
+pwnbridge host use remote-x86      # current project override
+pwnbridge host use --default       # remove the project override
+```
+
+`PWNBRIDGE_HOST` overrides both stored selections, and `--host NAME` overrides
+the environment for one invocation. If the displayed project root is not the
+directory you expected, check for a `.pwnbridge.toml` in an ancestor; its
+workspace root determines which local binding applies.
+
 ## Mutagen is missing or the version is wrong
 
 Pwnbridge requires exactly Mutagen 0.18.1 because CLI templates and health

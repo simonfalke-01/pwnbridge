@@ -62,6 +62,12 @@ $XDG_DATA_HOME/pwnbridge/    recovery copies
 $XDG_CACHE_HOME/pwnbridge/   disposable provider helpers
 ```
 
+Configured hosts and `default_host` are machine-wide configuration. A project
+override is local XDG state keyed by the canonical project root; it is never
+written into the portable project file. Effective host selection is the global
+default, then the project binding, then `PWNBRIDGE_HOST`, then the one-shot
+`--host` flag.
+
 Private directories are mode 0700; private files and sockets are mode 0600.
 State writes use an fsync-plus-rename atomic-write path. A cross-process file
 lock serializes barriers and identity initialization.

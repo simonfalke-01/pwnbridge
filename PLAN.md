@@ -103,7 +103,9 @@ Continuous watching is a latency optimization. Flush plus complete health valida
 
 ```console
 brew install simonfalke-01/pwnbridge/pwnbridge
+pwnbridge --version
 pwnbridge host add x86 pwnbox
+pwnbridge host default x86
 pwnbridge host doctor x86
 pwnbridge host bootstrap x86 --profile pwn
 pwnbridge host use x86
@@ -152,12 +154,15 @@ pwnbridge config validate
 pwnbridge config show [--effective] [--json]
 
 pwnbridge completion bash|zsh|fish
+pwnbridge --version
 pwnbridge version [--json]
 ```
 
 Behavioral rules:
 
 - Bare `pwnbridge` means `pwnbridge shell`.
+- `host default NAME` changes the machine fallback; `host use NAME` changes only the current project, and `host use --default` clears that project override.
+- In `host list`, `*` marks the machine default and `>` marks the current project's effective host.
 - The nearest ancestor `.pwnbridge.toml` defines the project; otherwise the current directory is the project root.
 - Git roots are not selected implicitly.
 - `run` transmits argv structurally. Pipelines require an explicit `bash -lc`.

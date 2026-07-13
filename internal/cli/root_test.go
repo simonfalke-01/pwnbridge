@@ -17,6 +17,7 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/shell"
 	"github.com/simonfalke-01/pwnbridge/internal/syncer"
 	"github.com/simonfalke-01/pwnbridge/internal/workspace"
+	"github.com/spf13/cobra"
 )
 
 func testApp(t *testing.T) (*App, *bytes.Buffer) {
@@ -272,6 +273,40 @@ func TestVersionJSON(t *testing.T) {
 	if !strings.Contains(output.String(), `"protocol": 1`) {
 		t.Fatalf("output: %s", output)
 	}
+}
+
+func TestRootVersionFlag(t *testing.T) {
+	app, output := testApp(t)
+	if err := execute(t, app, "--version"); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "pwnbridge dev (unknown, unknown)\n" {
+		t.Fatalf("--version output = %q", got)
+	}
+	output.Reset()
+	if err := execute(t, app, "-v"); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "pwnbridge dev (unknown, unknown)\n" {
+		t.Fatalf("-v output = %q", got)
+	}
+}
+
+func TestVisibleCommandsHaveDescriptions(t *testing.T) {
+	app, _ := testApp(t)
+	var visit func(*cobra.Command)
+	visit = func(parent *cobra.Command) {
+		for _, cmd := range parent.Commands() {
+			if cmd.Hidden {
+				continue
+			}
+			if strings.TrimSpace(cmd.Short) == "" {
+				t.Errorf("visible command %q has no help description", cmd.CommandPath())
+			}
+			visit(cmd)
+		}
+	}
+	visit(app.Root())
 }
 
 func TestDoctorWithoutHostDoesNotPanic(t *testing.T) {

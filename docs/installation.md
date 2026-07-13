@@ -159,12 +159,18 @@ Bootstrap is safe to rerun after interruption or during upgrades.
 ## Verify installation
 
 ```console
+pwnbridge --version
 pwnbridge version --json
 pwnbridge doctor
 pwnbridge terminal providers
+pwnbridge host default x86
 cd /path/to/challenge
 pwnbridge host use x86
 pwnbridge run -- uname -m
 ```
 
-The final command must print `x86_64` even on an Apple Silicon Mac.
+`host default` sets the machine-wide fallback; `host use` creates an override
+for this verification project, and `host use --default` would remove it. In
+`host list`, `*` marks the machine default and `>` marks the current project's
+effective host. The final command must print `x86_64` even on an Apple Silicon
+Mac.
