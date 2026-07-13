@@ -14,6 +14,7 @@ all: verify build
 build:
 	mkdir -p bin
 	$(GO) build -trimpath -o bin/pwnbridge ./cmd/pwnbridge
+	ln -sf pwnbridge bin/pb
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -o bin/pwnbridge-agent-linux-amd64 ./cmd/pwnbridge-agent
 
 test:

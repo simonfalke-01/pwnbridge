@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/simonfalke-01/pwnbridge/internal/cli"
@@ -23,7 +24,7 @@ func main() {
 		err = ctxErr
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pwnbridge:", err)
+		fmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+":", err)
 		os.Exit(cli.ExitCode(err))
 	}
 }

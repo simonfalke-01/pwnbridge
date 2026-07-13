@@ -36,6 +36,32 @@ func execute(t *testing.T, app *App, args ...string) error {
 	return cmd.Execute()
 }
 
+func TestRootRejectsRemovedCommandShorthand(t *testing.T) {
+	app, _ := testApp(t)
+	err := execute(t, app, "--", "pwninit")
+	if err == nil || !strings.Contains(err.Error(), "pwnbridge run") || !strings.Contains(err.Error(), "pb COMMAND") {
+		t.Fatalf("removed shorthand was not rejected clearly: %v", err)
+	}
+}
+
+func TestPBIsAFlagTransparentRunAlias(t *testing.T) {
+	app, output := testApp(t)
+	app.ProgramName = "pb"
+	if err := execute(t, app, "--help"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "pb COMMAND [ARG...]") {
+		t.Fatalf("pb help is missing its invocation: %s", output)
+	}
+	output.Reset()
+	if err := execute(t, app, "--", "pwninit"); err == nil || !strings.Contains(err.Error(), "does not need `--`") {
+		t.Fatalf("pb accepted a redundant delimiter: %v", err)
+	}
+	if err := execute(t, app, "pwninit", "--no-template"); err == nil || !strings.Contains(err.Error(), "no host selected") {
+		t.Fatalf("pb did not pass command flags through to the run path: %v", err)
+	}
+}
+
 func TestImplicitWorkspaceGuardBlocksAccidentalLargeDirectory(t *testing.T) {
 	root := t.TempDir()
 	large := filepath.Join(root, "movie.mkv")

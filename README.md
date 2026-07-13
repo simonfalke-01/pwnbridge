@@ -71,6 +71,7 @@ git clone https://github.com/simonfalke-01/pwnbridge.git
 cd pwnbridge
 make build
 install -m 0755 bin/pwnbridge ~/.local/bin/pwnbridge
+ln -sf pwnbridge ~/.local/bin/pb
 install -m 0755 bin/pwnbridge-agent-linux-amd64 \
   ~/.local/bin/pwnbridge-agent-linux-amd64
 ```
@@ -143,6 +144,8 @@ cd /path/to/challenge
 pwnbridge host use x86
 pwnbridge doctor
 pwnbridge                         # managed interactive Bash
+pwnbridge run -- pwninit          # one command (explicit form)
+pb pwninit                        # one command (concise form)
 pwnbridge run -- ./chall          # one command
 pwnbridge run -- python solve.py
 pwnbridge run --tty=always -- gdb ./chall

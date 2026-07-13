@@ -37,11 +37,12 @@ import (
 )
 
 type App struct {
-	Paths    paths.Paths
-	In       *os.File
-	Out      io.Writer
-	Err      io.Writer
-	HostFlag string
+	Paths       paths.Paths
+	In          *os.File
+	Out         io.Writer
+	Err         io.Writer
+	HostFlag    string
+	ProgramName string
 }
 
 type projectContext struct {
@@ -75,13 +76,22 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{Paths: p, In: os.Stdin, Out: os.Stdout, Err: os.Stderr}, nil
+	return &App{Paths: p, In: os.Stdin, Out: os.Stdout, Err: os.Stderr, ProgramName: filepath.Base(os.Args[0])}, nil
 }
 
 func (a *App) Root() *cobra.Command {
+	if a.ProgramName == "pb" {
+		return a.pbRoot()
+	}
 	root := &cobra.Command{
 		Use: "pwnbridge", Short: "Make a remote Linux x86-64 pwn environment feel local",
 		SilenceUsage: true, SilenceErrors: true,
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) != 0 {
+				return errors.New("use `pwnbridge run -- COMMAND` or the concise `pb COMMAND`")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) },
 	}
 	root.PersistentFlags().StringVar(&a.HostFlag, "host", "", "override the configured remote host")
@@ -93,6 +103,27 @@ func (a *App) Root() *cobra.Command {
 	)
 	root.AddCommand(completionCommand(root))
 	return root
+}
+
+func (a *App) pbRoot() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:                "pb COMMAND [ARG...]",
+		Short:              "Run one command in the remote pwn environment",
+		SilenceUsage:       true,
+		SilenceErrors:      true,
+		DisableFlagParsing: true,
+		Args:               cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if args[0] == "-h" || args[0] == "--help" {
+				return cmd.Help()
+			}
+			if args[0] == "--" {
+				return errors.New("`pb` does not need `--`; use `pb COMMAND [ARG...]`")
+			}
+			return a.run(cmd.Context(), args, "auto")
+		},
+	}
+	return cmd
 }
 
 func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContext, error) {
@@ -539,53 +570,55 @@ func (a *App) shell(ctx context.Context) (result error) {
 func (a *App) runCommand() *cobra.Command {
 	var ttyMode string
 	cmd := &cobra.Command{Use: "run -- COMMAND [ARG...]", Short: "Run a command in the remote workspace", Args: cobra.MinimumNArgs(1), DisableFlagParsing: false,
-		RunE: func(cmd *cobra.Command, args []string) (result error) {
-			if ttyMode != "auto" && ttyMode != "always" && ttyMode != "never" {
-				return fmt.Errorf("--tty must be auto, always, or never (got %q)", ttyMode)
-			}
-			p, err := a.loadProject(cmd.Context(), true)
-			if err != nil {
-				return err
-			}
-			progress := newLaunchProgress(a.Err)
-			defer progress.Stop()
-			session, err := a.startSession(cmd.Context(), p, progress)
-			if err != nil {
-				return err
-			}
-			defer func() {
-				cleanupProgress := newLaunchProgress(a.Err)
-				cleanupProgress.Stage("Saving workspace")
-				if closeErr := session.Close(context.Background()); closeErr != nil {
-					result = errors.Join(result, closeErr)
-				}
-				cleanupProgress.Stop()
-			}()
-			request := protocol.ExecRequest{Args: args, Cwd: p.WS.RemotePath, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
-			encoded, err := agent.EncodeRequest(request)
-			if err != nil {
-				return err
-			}
-			tty := ttyMode == "always" || ttyMode == "auto" && term.IsTerminal(int(a.In.Fd()))
-			remote := session.Master.Command(cmd.Context(), tty, "exec", encoded)
-			remote.Stdin, remote.Stdout, remote.Stderr = a.In, a.Out, a.Err
-			progress.Stop()
-			if tty && term.IsTerminal(int(a.In.Fd())) {
-				old, rawErr := term.MakeRaw(int(a.In.Fd()))
-				if rawErr != nil {
-					return rawErr
-				}
-				defer term.Restore(int(a.In.Fd()), old)
-			}
-			if err := remote.Run(); cmd.Context().Err() != nil {
-				return cmd.Context().Err()
-			} else {
-				return err
-			}
-		},
+		RunE: func(cmd *cobra.Command, args []string) error { return a.run(cmd.Context(), args, ttyMode) },
 	}
 	cmd.Flags().StringVar(&ttyMode, "tty", "auto", "PTY mode: auto, always, or never")
 	return cmd
+}
+
+func (a *App) run(ctx context.Context, args []string, ttyMode string) (result error) {
+	if ttyMode != "auto" && ttyMode != "always" && ttyMode != "never" {
+		return fmt.Errorf("--tty must be auto, always, or never (got %q)", ttyMode)
+	}
+	p, err := a.loadProject(ctx, true)
+	if err != nil {
+		return err
+	}
+	progress := newLaunchProgress(a.Err)
+	defer progress.Stop()
+	session, err := a.startSession(ctx, p, progress)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		cleanupProgress := newLaunchProgress(a.Err)
+		cleanupProgress.Stage("Saving workspace")
+		if closeErr := session.Close(context.Background()); closeErr != nil {
+			result = errors.Join(result, closeErr)
+		}
+		cleanupProgress.Stop()
+	}()
+	request := protocol.ExecRequest{Args: args, Cwd: p.WS.RemotePath, Environment: session.environment(), Terminal: session.terminalSpec(), Runtime: session.runtimeSpec()}
+	encoded, err := agent.EncodeRequest(request)
+	if err != nil {
+		return err
+	}
+	tty := ttyMode == "always" || ttyMode == "auto" && term.IsTerminal(int(a.In.Fd()))
+	remote := session.Master.Command(ctx, tty, "exec", encoded)
+	remote.Stdin, remote.Stdout, remote.Stderr = a.In, a.Out, a.Err
+	progress.Stop()
+	if tty && term.IsTerminal(int(a.In.Fd())) {
+		old, rawErr := term.MakeRaw(int(a.In.Fd()))
+		if rawErr != nil {
+			return rawErr
+		}
+		defer term.Restore(int(a.In.Fd()), old)
+	}
+	if err := remote.Run(); ctx.Err() != nil {
+		return ctx.Err()
+	} else {
+		return err
+	}
 }
 
 func (a *App) initCommand() *cobra.Command {

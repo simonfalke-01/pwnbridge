@@ -27,6 +27,7 @@ with `checksums.txt` and the published attestation/SBOM before installation.
 ```console
 tar -xzf pwnbridge_VERSION_Darwin_arm64.tar.gz
 install -m 0755 pwnbridge ~/.local/bin/pwnbridge
+ln -sf pwnbridge ~/.local/bin/pb
 install -m 0755 pwnbridge-agent-linux-amd64 \
   ~/.local/bin/pwnbridge-agent-linux-amd64
 ```
@@ -42,9 +43,9 @@ Install from the published tap with:
 brew install simonfalke-01/pwnbridge/pwnbridge
 ```
 
-The formula installs the release Darwin client, its matching static
-Linux agent in formula `libexec`, and shell completions, and depends on the
-external Mutagen formula. It never vendors Mutagen.
+The formula installs the release Darwin client, the `pb` one-shot alias, its
+matching static Linux agent in formula `libexec`, and shell completions, and
+depends on the external Mutagen formula. It never vendors Mutagen.
 
 ## Source build
 

@@ -8,6 +8,11 @@ Open managed interactive Bash in the synchronized remote workspace. Bare
 `pwnbridge` is identical. Pre-command Enter and post-command prompt are guarded
 by synchronization barriers.
 
+The installed `pb` executable is the concise one-shot interface. `pb COMMAND
+[ARG...]` is equivalent to `pwnbridge run -- COMMAND [ARG...]` with automatic
+PTY selection. It deliberately needs no `--`: `pb pwninit` runs `pwninit` and
+returns without opening a shell.
+
 ### `pwnbridge run [--tty=auto|always|never] -- COMMAND [ARG...]`
 
 Run structural argv in the active remote runtime. `auto` allocates a PTY when
