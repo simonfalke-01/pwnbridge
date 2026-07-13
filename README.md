@@ -108,8 +108,6 @@ Then register and prepare it:
 pwnbridge host add x86 pwnbox
 pwnbridge host doctor x86
 pwnbridge host bootstrap x86 --profile pwn
-pwnbridge host use x86
-pwnbridge doctor
 ```
 
 `host bootstrap` prints its package plan before invoking sudo. It is
@@ -137,9 +135,13 @@ owned by the SSH user. Bootstrap is idempotent, and future client upgrades
 deploy a new content-addressed agent automatically—no `scp`, remote login,
 system-wide Pwnbridge binary, or persistent daemon is required.
 
-No per-challenge config is required. From any challenge directory:
+Host selection is project-local, so change into the challenge directory before
+binding it. No per-challenge config file is required:
 
 ```console
+cd /path/to/challenge
+pwnbridge host use x86
+pwnbridge doctor
 pwnbridge                         # managed interactive Bash
 pwnbridge run -- ./chall          # one command
 pwnbridge run -- python solve.py

@@ -36,6 +36,51 @@ func execute(t *testing.T, app *App, args ...string) error {
 	return cmd.Execute()
 }
 
+func TestImplicitWorkspaceGuardBlocksAccidentalLargeDirectory(t *testing.T) {
+	root := t.TempDir()
+	large := filepath.Join(root, "movie.mkv")
+	file, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(implicitWorkspaceMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardImplicitWorkspace(root, ""); err == nil || !strings.Contains(err.Error(), "pwnbridge init") {
+		t.Fatalf("large implicit workspace was not blocked with remediation: %v", err)
+	}
+	if err := guardImplicitWorkspace(root, filepath.Join(root, ".pwnbridge.toml")); err != nil {
+		t.Fatalf("explicit project was blocked: %v", err)
+	}
+}
+
+func TestImplicitWorkspaceGuardSkipsBuiltInIgnores(t *testing.T) {
+	root := t.TempDir()
+	gitDir := filepath.Join(root, ".git", "objects")
+	if err := os.MkdirAll(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	large := filepath.Join(gitDir, "pack")
+	file, err := os.Create(large)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(implicitWorkspaceMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := guardImplicitWorkspace(root, ""); err != nil {
+		t.Fatalf("built-in ignored content triggered guard: %v", err)
+	}
+}
+
 func TestHostLifecycle(t *testing.T) {
 	app, output := testApp(t)
 	cwd := t.TempDir()

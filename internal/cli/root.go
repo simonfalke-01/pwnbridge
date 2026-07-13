@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -204,7 +205,57 @@ func (a *App) barrier(ctx context.Context, p *projectContext) error {
 	return err
 }
 
+const (
+	implicitWorkspaceMaxBytes = int64(2 << 30)
+	implicitWorkspaceMaxFiles = 10_000
+)
+
+func guardImplicitWorkspace(root, projectConfig string) error {
+	if projectConfig != "" {
+		return nil
+	}
+	ignoredDirectories := map[string]bool{
+		".git": true, ".pwnbridge": true, ".venv": true, "venv": true,
+		"__pycache__": true, ".idea": true, ".vscode": true,
+	}
+	var bytes, files int64
+	errLimit := errors.New("implicit workspace safety limit exceeded")
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != root && entry.IsDir() && ignoredDirectories[entry.Name()] {
+			return fs.SkipDir
+		}
+		if entry.IsDir() || entry.Name() == ".DS_Store" || strings.HasSuffix(entry.Name(), ".pyc") {
+			return nil
+		}
+		files++
+		if entry.Type().IsRegular() {
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			bytes += info.Size()
+		}
+		if bytes > implicitWorkspaceMaxBytes || files > implicitWorkspaceMaxFiles {
+			return errLimit
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errLimit) {
+		return fmt.Errorf("inspect implicit workspace %s: %w", root, err)
+	}
+	return fmt.Errorf("refusing to synchronize implicit workspace %s: it exceeds the automatic safety limit (at least %.1f GiB or %d files); cd into the challenge directory, or run `pwnbridge init` here to explicitly confirm this project root", root, float64(bytes)/(1<<30), files)
+}
+
 func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSession, error) {
+	if err := guardImplicitWorkspace(p.Config.ProjectRoot, p.Config.ProjectPath); err != nil {
+		return nil, err
+	}
 	if _, err := a.liveSessions(p.WS.LocalRoot); err != nil {
 		return nil, err
 	}
@@ -784,10 +835,13 @@ func (a *App) hostUse() *cobra.Command {
 		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
+		if err := guardImplicitWorkspace(p.Config.ProjectRoot, p.Config.ProjectPath); err != nil {
+			return err
+		}
 		if err := p.Manager.SetBinding(p.Config.ProjectRoot, args[0]); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "project now uses host %s\n", args[0])
+		fmt.Fprintf(a.Out, "project %s now uses host %s\n", p.Config.ProjectRoot, args[0])
 		return nil
 	}}
 }
