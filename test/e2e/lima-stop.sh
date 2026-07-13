@@ -49,7 +49,11 @@ wait "$RUNNER"
 status=$?
 set -e
 RUNNER=""
-test "$status" -eq 130
+if [ "$status" -ne 130 ]; then
+    cat "$TMP/runner.log" >&2
+    echo "stopped pwnbridge exited $status instead of 130" >&2
+    exit 1
+fi
 test -z "$(find "$XDG_STATE_HOME/pwnbridge/sessions" -name '*.json' -type f -print -quit 2>/dev/null)"
 "$ROOT/bin/pwnbridge" sync status --json | python3 -c 'import json,sys; assert json.load(sys.stdin)["data"]["paused"] is True'
 "$ROOT/bin/pwnbridge" clean --remote --yes

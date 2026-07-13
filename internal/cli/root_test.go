@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -138,6 +139,9 @@ func TestJSONEnvelopeAndExitCodes(t *testing.T) {
 	}
 	if got := ExitCode(&shell.ExitError{Code: 42}); got != 42 {
 		t.Fatalf("remote exit status lost: %d", got)
+	}
+	if got := ExitCode(errors.Join(&shell.ExitError{Code: 42}, context.Canceled)); got != 130 {
+		t.Fatalf("local cancellation lost to teardown status: %d", got)
 	}
 	if got := ExitCode(&syncer.UnhealthyError{}); got != 4 {
 		t.Fatalf("sync exit status = %d", got)

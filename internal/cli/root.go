@@ -331,16 +331,6 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("acquire session lease: %w", err)
 	}
-	if err := broker.SaveSession(recordPath, record); err != nil {
-		lease.Close()
-		_ = os.Remove(leasePath)
-		master.Close()
-		if b != nil {
-			b.Close()
-		}
-		os.RemoveAll(runtimeDir)
-		return nil, err
-	}
 	if b != nil {
 		_, err = master.Run(ctx, "broker-ping", protocol.BrokerPing{SessionID: id, Address: record.RemoteSocket, Token: token})
 	}
@@ -354,6 +344,19 @@ func (a *App) startSession(ctx context.Context, p *projectContext) (*activeSessi
 		_ = os.Remove(leasePath)
 		os.RemoveAll(runtimeDir)
 		return nil, fmt.Errorf("reverse broker verification failed: %w", err)
+	}
+	// Publish the session only after its control plane is usable. This makes
+	// the atomic record a readiness boundary for `stop` and other processes,
+	// rather than exposing a half-initialized broker verification window.
+	if err := broker.SaveSession(recordPath, record); err != nil {
+		lease.Close()
+		_ = os.Remove(leasePath)
+		master.Close()
+		if b != nil {
+			b.Close()
+		}
+		os.RemoveAll(runtimeDir)
+		return nil, err
 	}
 	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Lease: lease}, nil
 }
@@ -1559,6 +1562,12 @@ func ExitCode(err error) int {
 	if err == nil {
 		return 0
 	}
+	// Local cancellation owns the result even if teardown also reports an SSH
+	// or remote-process error. This keeps Ctrl-C and `pwnbridge stop`
+	// deterministic instead of leaking a timing-dependent cleanup exit code.
+	if errors.Is(err, context.Canceled) {
+		return 130
+	}
 	var remoteShell *shell.ExitError
 	if errors.As(err, &remoteShell) && remoteShell.Code > 0 && remoteShell.Code <= 255 {
 		return remoteShell.Code
@@ -1572,9 +1581,6 @@ func ExitCode(err error) int {
 	var unhealthy *syncer.UnhealthyError
 	if errors.As(err, &unhealthy) {
 		return 4
-	}
-	if errors.Is(err, context.Canceled) {
-		return 130
 	}
 	return 1
 }

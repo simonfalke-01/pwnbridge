@@ -2,11 +2,40 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestCanceledCommandsPreserveContextError(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexec sleep 30\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{SSH: ssh, Destination: "fake", AgentPath: "/agent"}
+	for name, run := range map[string]func(context.Context) error{
+		"client": func(ctx context.Context) error {
+			_, err := client.run(ctx, "ignored")
+			return err
+		},
+		"master": func(ctx context.Context) error {
+			_, err := (&Master{Client: client}).Run(ctx, "broker-ping", map[string]string{"value": "test"})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(20*time.Millisecond, cancel)
+			if err := run(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("cancellation was obscured by process error: %v", err)
+			}
+		})
+	}
+}
 
 func TestRemoteAgentCommandQuotesRequest(t *testing.T) {
 	got := remoteAgentCommand("~/.local/share/pwnbridge/agent", "exec", "abc_DEF-123")

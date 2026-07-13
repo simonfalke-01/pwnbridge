@@ -210,11 +210,14 @@ Python, process, gdbserver, manifest reader, and GDB use that same container ID.
 An active session record contains its owner PID and has a sibling advisory-lock
 lease held for the full session lifetime. The kernel lease is authoritative;
 PID existence is only a secondary sanity check, so PID reuse cannot make an
-unlocked stale record look live. Even an old corrupt record is removed only if
-its private lease file can be acquired non-blockingly. `stop` signals validated
-live owners, waits for cleanup, performs a final barrier, and pauses only after
-the final lease exits. Container removal and remote session cleanup use the
-Mac-owned runtime record.
+unlocked stale record look live. The atomic record is published only after the
+SSH control plane and reverse-broker ping are ready, so other processes never
+observe a half-initialized session. Even an old corrupt record is removed only
+if its private lease file can be acquired non-blockingly. `stop` signals
+validated live owners, waits for cleanup, performs a final barrier, and pauses
+only after the final lease exits. Local cancellation takes precedence over
+incidental SSH teardown errors and exits deterministically as 130. Container
+removal and remote session cleanup use the Mac-owned runtime record.
 
 Deleting a remote root is not interpreted as a request to propagate deletion.
 Pwnbridge validates an existing root before resuming; if it vanished or became

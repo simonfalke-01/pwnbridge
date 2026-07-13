@@ -479,6 +479,8 @@ ssh -M -N
 - Use the user's ordinary SSH configuration.
 - Never disable strict host-key verification.
 - Wait with `ssh -O check`, not sleeps.
+- Publish the atomic active-session record only after the control master and
+  reverse-broker ping are usable; it is a readiness boundary for `stop`.
 - Main shells and panes use `ssh -S ... -tt -e none` channels.
 - Keep the master until the final shell, run, or pane lease exits.
 - Cancel forwards and issue `ssh -O exit` on clean shutdown.
@@ -591,6 +593,8 @@ Docker and Podman share one adapter. A session uses one long-lived named contain
 - Sanitize pane titles, cap metadata, and redact tokens/environment secrets from logs.
 - GDBserver is not publicly exposed.
 - Network loss restores the terminal and preserves both workspaces.
+- Local cancellation owns exit status 130 even when an SSH child or teardown
+  command fails concurrently.
 - Mutagen crashes cause isolated daemon restart and full session revalidation.
 - Conflicts, root deletion, disk full, and permission errors block execution without automatic reset.
 - A kernel advisory lease, not PID existence alone, proves that a session is
@@ -770,7 +774,7 @@ agent, broker, and runtime paths used by the CLI were exercised.
 | Pwntools/GDB | pwntools 4.15.0 and pinned 5-dev commit `6571ec7de50d3c8fc235fad2a27bcdb07ca87acf` exercise `gdb.debug()`, process attach, `api=True`, and concurrent debuggers; Pwndbg 2026.02.18 and GDB TUI/resize pass |
 | Terminal integration | Zellij 0.44.3 and tmux 3.6a host panes pass; custom-provider PTYs and explicit remote tmux pass; remote tmux remains correct in the presence of a stale unrelated tmux server because each managed session has a private server/socket |
 | Runtime coverage | Direct Ubuntu amd64 and Podman container execution pass; solve process, gdbserver, GDB, wrapper, and API bridge remain in the intended runtime namespace |
-| Degradation and recovery | Reverse-forwarding denial degrades ordinary shell/run cleanly and retains explicit remote-multiplexer GDB; live SSH-master termination restores the host terminal and preserves/reconciles data; `pwnbridge stop` terminates leased sessions safely |
+| Degradation and recovery | Reverse-forwarding denial degrades ordinary shell/run cleanly and retains explicit remote-multiplexer GDB; live SSH-master termination restores the host terminal and preserves/reconciles data; session records publish only after broker readiness, and a ten-run immediate-stop stress test terminates leased sessions with deterministic status 130 |
 | Security and quality | `gosec` passes under the documented deliberate exclusions; `govulncheck` reports no reachable vulnerabilities; ShellCheck, actionlint, workflow YAML parsing, Python syntax, Ruby syntax, and Homebrew style pass |
 | Distribution | GoReleaser emits Darwin arm64/amd64 clients plus a static Linux amd64 agent, documentation, completions, checksums, and SPDX 2.3 SBOMs; output and archive file times are fixed independently from embedded version metadata, checksums verify, and two clean builds produce byte-identical archives even without a configured Git remote |
 

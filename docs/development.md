@@ -75,7 +75,7 @@ Individual scenarios:
 | `lima-container-gdb.sh` | debug/attach/API in one container namespace |
 | `lima-remote-mux.sh` | explicit visible remote tmux pane |
 | `lima-no-forward.sh` | ordinary fallback plus remote-mux GDB when reverse forwarding is prohibited |
-| `lima-stop.sh` | live-process signal, exit 130, final flush/pause |
+| `lima-stop.sh` | publication-readiness race, live-process signal, deterministic exit 130, final flush/pause |
 
 The full container GDB test expects an image tagged
 `localhost/pwnbridge-pwn:e2e` on the VM. Build it from the supplied Dockerfile

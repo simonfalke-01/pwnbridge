@@ -17,6 +17,11 @@ func main() {
 	if err == nil {
 		err = app.Root().ExecuteContext(ctx)
 	}
+	// A signal may kill an in-flight ssh/scp child before that layer can wrap
+	// context.Canceled. The process-level signal context remains authoritative.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = ctxErr
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pwnbridge:", err)
 		os.Exit(cli.ExitCode(err))

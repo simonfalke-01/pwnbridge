@@ -175,6 +175,9 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 	cmd := exec.CommandContext(ctx, c.SCP, "-q", "--", localPath, target)
 	cmd.Env = SafeSSHEnvironment()
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		return "", fmt.Errorf("upload agent: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	install := "set -eu; got=$(sha256sum " + shellQuote(tmp) + " | cut -d' ' -f1); " +
@@ -330,6 +333,9 @@ func (m *Master) Run(ctx context.Context, operation string, request any) ([]byte
 	cmd := m.Command(ctx, false, operation, encoded)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out, ctxErr
+		}
 		return out, fmt.Errorf("remote %s: %w: %s", operation, err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
@@ -373,6 +379,9 @@ func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := c.sshCommand(ctx, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out, ctxErr
+		}
 		return out, fmt.Errorf("ssh: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
