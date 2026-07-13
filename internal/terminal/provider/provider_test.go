@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -21,7 +22,7 @@ func TestAutoSelectTerminalFallback(t *testing.T) {
 	t.Setenv("TMUX_PANE", "")
 	t.Setenv("TERM_PROGRAM", "")
 	t.Setenv("KITTY_WINDOW_ID", "")
-	if _, err := os.Stat("/usr/bin/open"); err != nil {
+	if runtime.GOOS != "darwin" {
 		t.Skip("macOS only")
 	}
 	p, caps, err := NewRegistry(t.TempDir()).Select(t.Context(), "auto")
