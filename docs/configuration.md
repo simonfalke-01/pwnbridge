@@ -96,12 +96,16 @@ Use these commands rather than hand-editing host records:
 pwnbridge host add NAME DESTINATION
 pwnbridge host list
 pwnbridge host show NAME
+pwnbridge host default NAME
 pwnbridge host use NAME
+pwnbridge host use --default
 pwnbridge host remove NAME
 ```
 
-`host use` stores a local project-to-host binding under XDG state; it does not
-put a machine name into the project checkout.
+`host default` changes the machine-wide fallback. `host use NAME` stores a
+local project-to-host binding under XDG state, while `host use --default`
+removes that override. None of these commands put a machine name into the
+project checkout.
 
 `workspace_root` accepts a safe path below the remote home (the portable
 default) or an absolute server-local path such as `/srv/pwnbridge/workspaces`.

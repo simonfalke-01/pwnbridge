@@ -147,7 +147,7 @@ func (m Manager) SaveState(ws Workspace, state State) error {
 }
 
 func (m Manager) Binding(localRoot string) (string, error) {
-	root, err := filepath.Abs(localRoot)
+	root, err := canonicalLocalRoot(localRoot)
 	if err != nil {
 		return "", err
 	}
@@ -167,13 +167,25 @@ func (m Manager) Binding(localRoot string) (string, error) {
 }
 
 func (m Manager) SetBinding(localRoot, hostID string) error {
-	root, err := filepath.Abs(localRoot)
+	root, err := canonicalLocalRoot(localRoot)
 	if err != nil {
 		return err
 	}
 	h := sha256.Sum256([]byte(root))
 	path := filepath.Join(m.Paths.State, "bindings", hex.EncodeToString(h[:])[:16]+".json")
 	return fsutil.WriteJSON(path, Binding{Schema: 1, HostID: hostID})
+}
+
+func canonicalLocalRoot(localRoot string) (string, error) {
+	root, err := filepath.Abs(localRoot)
+	if err != nil {
+		return "", err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize binding root: %w", err)
+	}
+	return root, nil
 }
 
 type Lock struct{ file *os.File }

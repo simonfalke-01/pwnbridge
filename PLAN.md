@@ -126,7 +126,9 @@ pwnbridge clean [--remote] [--yes]
 pwnbridge host add NAME DESTINATION
 pwnbridge host list
 pwnbridge host show NAME [--json]
+pwnbridge host default NAME
 pwnbridge host use NAME
+pwnbridge host use --default
 pwnbridge host remove NAME
 pwnbridge host doctor NAME [--json]
 pwnbridge host bootstrap NAME [--profile=pwn] [--with-pwndbg]
@@ -268,7 +270,7 @@ workdir = "/work"
 network = "bridge"
 ```
 
-Project files never contain hostnames, users, SSH keys, local terminal choices, or bearer tokens. `pwnbridge host use` stores the project-to-host binding in local state.
+Project files never contain hostnames, users, SSH keys, local terminal choices, or bearer tokens. `pwnbridge host default` updates the machine-wide fallback; `pwnbridge host use` stores the project-to-host binding in local state.
 
 ### 6.4 Workspace identity
 

@@ -54,7 +54,9 @@ directory. Existing files are never overwritten. Configuration is optional.
 pwnbridge host add NAME DESTINATION
 pwnbridge host list
 pwnbridge host show NAME [--json]
+pwnbridge host default NAME
 pwnbridge host use NAME
+pwnbridge host use --default
 pwnbridge host remove NAME
 pwnbridge host doctor NAME [--json]
 pwnbridge host bootstrap NAME [--profile pwn]
@@ -66,11 +68,14 @@ pwnbridge host bootstrap NAME [--profile pwn]
 `add` writes machine-private global config. The first host becomes the default.
 Host names are 1–64 ASCII letters, digits, `.`, `_`, or `-`; the destination is
 an ordinary OpenSSH alias or `user@host` and cannot begin with an option.
-`use` writes a local project binding. `bootstrap --dry-run` does not deploy or
-mutate; `--no-sudo` skips apt and reports missing prerequisites; the only
-profile is `pwn`. Doctor/bootstrap probe reverse forwarding; unavailable
-forwarding is fatal to host-pane diagnostics but not to shell/run or explicit
-remote-multiplexer scope.
+`default` changes the machine-wide fallback. `use NAME` writes an override for
+the current project only, and `use --default` removes that override. In `host
+list`, `*` marks the machine default and `>` marks the current project's
+effective host. `bootstrap --dry-run` does not deploy or mutate; `--no-sudo`
+skips apt and reports missing prerequisites; the only profile is `pwn`.
+Doctor/bootstrap probe reverse forwarding; unavailable forwarding is fatal to
+host-pane diagnostics but not to shell/run or explicit remote-multiplexer
+scope.
 
 ## Synchronization commands
 

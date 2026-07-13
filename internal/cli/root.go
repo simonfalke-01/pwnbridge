@@ -149,6 +149,7 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 			hostID = binding
 		}
 	}
+	effective.SelectedHost = hostID
 	if hostID == "" {
 		if requireHost {
 			return nil, errors.New("no host selected; run `pwnbridge host add NAME DESTINATION` and `pwnbridge host use NAME`")
@@ -802,7 +803,7 @@ func (a *App) cleanCommand() *cobra.Command {
 
 func (a *App) hostCommand() *cobra.Command {
 	host := &cobra.Command{Use: "host", Short: "Manage remote hosts"}
-	host.AddCommand(a.hostAdd(), a.hostList(), a.hostShow(), a.hostUse(), a.hostRemove(), a.hostDoctor(), a.hostBootstrap())
+	host.AddCommand(a.hostAdd(), a.hostList(), a.hostShow(), a.hostDefault(), a.hostUse(), a.hostRemove(), a.hostDoctor(), a.hostBootstrap())
 	return host
 }
 
@@ -837,25 +838,34 @@ func (a *App) hostAdd() *cobra.Command {
 }
 
 func (a *App) hostList() *cobra.Command {
-	return &cobra.Command{Use: "list", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		p, err := a.loadProject(cmd.Context(), false)
-		if err != nil {
-			return err
-		}
-		names := make([]string, 0, len(p.Config.Global.Hosts))
-		for name := range p.Config.Global.Hosts {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			marker := " "
-			if name == p.Config.Global.DefaultHost {
-				marker = "*"
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List hosts (* machine default, > current project)",
+		Long:  "List configured hosts. An asterisk (*) marks the machine-wide default; a greater-than sign (>) marks the current project's effective host.",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			p, err := a.loadProject(cmd.Context(), false)
+			if err != nil {
+				return err
 			}
-			fmt.Fprintf(a.Out, "%s %-16s %s\n", marker, name, p.Config.Global.Hosts[name].Destination)
-		}
-		return nil
-	}}
+			names := make([]string, 0, len(p.Config.Global.Hosts))
+			for name := range p.Config.Global.Hosts {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				defaultMarker := " "
+				if name == p.Config.Global.DefaultHost {
+					defaultMarker = "*"
+				}
+				projectMarker := " "
+				if name == p.Config.SelectedHost {
+					projectMarker = ">"
+				}
+				fmt.Fprintf(a.Out, "%s%s %-16s %s\n", defaultMarker, projectMarker, name, p.Config.Global.Hosts[name].Destination)
+			}
+			return nil
+		}}
 }
 
 func (a *App) hostShow() *cobra.Command {
@@ -879,8 +889,8 @@ func (a *App) hostShow() *cobra.Command {
 	return cmd
 }
 
-func (a *App) hostUse() *cobra.Command {
-	return &cobra.Command{Use: "use NAME", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+func (a *App) hostDefault() *cobra.Command {
+	return &cobra.Command{Use: "default NAME", Short: "Set the machine-wide default host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		p, err := a.loadProject(cmd.Context(), false)
 		if err != nil {
 			return err
@@ -888,8 +898,46 @@ func (a *App) hostUse() *cobra.Command {
 		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
+		p.Config.Global.DefaultHost = args[0]
+		p.Config.SelectedHost = args[0]
+		if err := p.Config.Validate(); err != nil {
+			return err
+		}
+		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
+			return err
+		}
+		fmt.Fprintf(a.Out, "default host is now %s\n", args[0])
+		return nil
+	}}
+}
+
+func (a *App) hostUse() *cobra.Command {
+	var followDefault bool
+	cmd := &cobra.Command{Use: "use NAME", Short: "Set the current project's host", Args: func(cmd *cobra.Command, args []string) error {
+		if followDefault {
+			if len(args) != 0 {
+				return errors.New("use either a host name or --default, not both")
+			}
+			return nil
+		}
+		return cobra.ExactArgs(1)(cmd, args)
+	}, RunE: func(cmd *cobra.Command, args []string) error {
+		p, err := a.loadProject(cmd.Context(), false)
+		if err != nil {
+			return err
+		}
 		if err := guardImplicitWorkspace(p.Config.ProjectRoot, p.Config.ProjectPath); err != nil {
 			return err
+		}
+		if followDefault {
+			if err := p.Manager.SetBinding(p.Config.ProjectRoot, ""); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Out, "project %s now follows default host %s\n", p.Config.ProjectRoot, empty(p.Config.Global.DefaultHost, "not selected"))
+			return nil
+		}
+		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
+			return fmt.Errorf("unknown host %q", args[0])
 		}
 		if err := p.Manager.SetBinding(p.Config.ProjectRoot, args[0]); err != nil {
 			return err
@@ -897,6 +945,8 @@ func (a *App) hostUse() *cobra.Command {
 		fmt.Fprintf(a.Out, "project %s now uses host %s\n", p.Config.ProjectRoot, args[0])
 		return nil
 	}}
+	cmd.Flags().BoolVar(&followDefault, "default", false, "remove the project override and follow the machine default")
+	return cmd
 }
 
 func (a *App) hostRemove() *cobra.Command {

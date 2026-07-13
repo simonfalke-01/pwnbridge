@@ -135,6 +135,91 @@ func TestHostLifecycle(t *testing.T) {
 	if !strings.Contains(output.String(), "user@example") {
 		t.Fatalf("output: %s", output)
 	}
+	output.Reset()
+	if err := execute(t, app, "host", "add", "remote", "user@remote"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "host", "default", "remote"); err != nil {
+		t.Fatal(err)
+	}
+	effective, err = config.Load(cwd, app.Paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.Global.DefaultHost != "remote" {
+		t.Fatalf("host default did not update the default: %q", effective.Global.DefaultHost)
+	}
+	manager := workspace.Manager{Paths: app.Paths}
+	if binding, bindErr := manager.Binding(cwd); bindErr != nil || binding != "" {
+		t.Fatalf("host default unexpectedly changed the project binding: binding=%q err=%v", binding, bindErr)
+	}
+	if !strings.Contains(output.String(), "default host is now remote") {
+		t.Fatalf("host default output did not describe its effect: %s", output)
+	}
+	if err := execute(t, app, "host", "use", "x86"); err != nil {
+		t.Fatal(err)
+	}
+	if binding, bindErr := manager.Binding(cwd); bindErr != nil || binding != "x86" {
+		t.Fatalf("host use did not bind the current project: binding=%q err=%v", binding, bindErr)
+	}
+	effective, err = config.Load(cwd, app.Paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if effective.Global.DefaultHost != "remote" {
+		t.Fatalf("host use changed the machine default: %q", effective.Global.DefaultHost)
+	}
+	if err := execute(t, app, "host", "use", "--default"); err != nil {
+		t.Fatal(err)
+	}
+	if binding, bindErr := manager.Binding(cwd); bindErr != nil || binding != "" {
+		t.Fatalf("host use --default did not clear the project binding: binding=%q err=%v", binding, bindErr)
+	}
+}
+
+func TestHostListHelpExplainsScopeMarkers(t *testing.T) {
+	app, output := testApp(t)
+	if err := execute(t, app, "host", "list", "--help"); err != nil {
+		t.Fatal(err)
+	}
+	help := output.String()
+	if !strings.Contains(help, "(*)") || !strings.Contains(help, "(>)") || !strings.Contains(help, "machine-wide default") || !strings.Contains(help, "current project's effective host") {
+		t.Fatalf("host list help does not explain its markers: %s", help)
+	}
+	output.Reset()
+	if err := execute(t, app, "host", "--help"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "* machine default, > current project") {
+		t.Fatalf("host command summary does not explain list markers: %s", output)
+	}
+}
+
+func TestEffectiveConfigReportsProjectBinding(t *testing.T) {
+	app, output := testApp(t)
+	cwd := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	if err := execute(t, app, "host", "add", "default", "user@default"); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "host", "add", "bound", "user@bound"); err != nil {
+		t.Fatal(err)
+	}
+	manager := workspace.Manager{Paths: app.Paths}
+	if err := manager.SetBinding(cwd, "bound"); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := execute(t, app, "config", "show", "--effective", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"selected_host": "bound"`) {
+		t.Fatalf("effective config ignored project binding: %s", output)
+	}
 }
 
 func TestHostAddRejectsInvalidInputWithoutWriting(t *testing.T) {

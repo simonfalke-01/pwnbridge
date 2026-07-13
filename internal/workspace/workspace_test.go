@@ -73,6 +73,29 @@ func TestBinding(t *testing.T) {
 	}
 }
 
+func TestBindingCanonicalizesSymlinkRoot(t *testing.T) {
+	base := t.TempDir()
+	realRoot := filepath.Join(base, "real")
+	aliasRoot := filepath.Join(base, "alias")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realRoot, aliasRoot); err != nil {
+		t.Fatal(err)
+	}
+	m := Manager{Paths: paths.Paths{State: filepath.Join(base, "state")}}
+	if err := m.SetBinding(aliasRoot, "remote"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Binding(realRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "remote" {
+		t.Fatalf("binding through symlink was not visible from canonical root: %q", got)
+	}
+}
+
 func TestMachineIDConcurrentInitialization(t *testing.T) {
 	root := t.TempDir()
 	manager := Manager{Paths: paths.Paths{State: filepath.Join(root, "state")}}
