@@ -1,0 +1,1 @@
+[{"identifier":"sync_QPHUoxd7sGevWnZNPQVNuwGvbkHi2ON3Jhz0KCZveJG","version":1,"alpha":{"protocol":"local","path":"/tmp/a","connected":true,"problems":[]},"beta":{"protocol":"ssh","host":"pwnbox","path":"~/work","connected":true,"problems":[]},"mode":"two-way-safe","paused":false,"status":"watching","conflicts":[],"excludedConflicts":0,"lastError":""}]

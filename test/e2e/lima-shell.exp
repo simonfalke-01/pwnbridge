@@ -1,0 +1,91 @@
+#!/usr/bin/expect -f
+set timeout 90
+
+set root $env(PWNBRIDGE_E2E_ROOT)
+spawn -noecho $root/bin/pwnbridge
+stty rows 30 columns 100 < $spawn_out(slave,name)
+expect {
+    -re {[$#] $} {}
+    timeout { puts stderr "managed shell did not present a prompt"; exit 1 }
+    eof { puts stderr "managed shell exited before prompt"; exit 1 }
+}
+
+set f [open "save-barrier.txt" "w"]
+puts -nonewline $f "new-local-content"
+close $f
+send -- "cat save-barrier.txt\r"
+expect {
+    -re {new-local-content} {}
+    timeout { puts stderr "save-before-enter barrier failed"; exit 1 }
+}
+expect -re {[$#] $}
+
+send -- "printf remote-content > prompt-artifact.txt\r"
+expect -re {[$#] $}
+if {![file exists "prompt-artifact.txt"]} {
+    puts stderr "post-command artifact was not synchronized before prompt"
+    exit 1
+}
+set f [open "prompt-artifact.txt" "r"]
+set content [read $f]
+close $f
+if {$content ne "remote-content"} {
+    puts stderr "post-command artifact content mismatch: $content"
+    exit 1
+}
+
+send -- "uname -m\r"
+expect {
+    -re {x86_64} {}
+    timeout { puts stderr "shell is not running on x86_64"; exit 1 }
+}
+expect -re {[$#] $}
+
+send -- "sleep 30\r"
+after 300
+send -- "\003"
+expect {
+    -re {[$#] $} {}
+    timeout { puts stderr "Ctrl-C did not return remote job control to the shell"; exit 1 }
+}
+
+send -- "sleep 30\r"
+after 300
+send -- "\032"
+expect {
+    -re {Stopped} {}
+    timeout { puts stderr "Ctrl-Z did not suspend the foreground job"; exit 1 }
+}
+expect -re {[$#] $}
+send -- "kill -TERM %1 2>/dev/null; kill -CONT %1 2>/dev/null; wait %1 2>/dev/null\r"
+expect -re {[$#] $}
+
+send -- "cat\r"
+after 300
+send -- "ctrl-d-roundtrip\r"
+send -- "\004"
+expect {
+    -re {ctrl-d-roundtrip} {}
+    timeout { puts stderr "PTY byte stream or Ctrl-D handling failed"; exit 1 }
+}
+expect -re {[$#] $}
+
+send -- "echo readline-wrong"
+send -- "\177\177\177\177\177"
+send -- "fixed\r"
+expect {
+    -re {readline-fixed} {}
+    timeout { puts stderr "remote readline editing failed"; exit 1 }
+}
+expect -re {[$#] $}
+
+stty rows 40 columns 120 < $spawn_out(slave,name)
+after 300
+send -- "stty size\r"
+expect {
+    -re {40 120} {}
+    timeout { puts stderr "remote PTY size was not propagated"; exit 1 }
+}
+expect -re {[$#] $}
+send -- "exit\r"
+expect eof

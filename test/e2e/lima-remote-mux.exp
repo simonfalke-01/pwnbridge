@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+set timeout 120
+
+set root $env(PWNBRIDGE_E2E_ROOT)
+set env(TERM) xterm-256color
+spawn -noecho $root/bin/pwnbridge
+expect {
+    -re {[$#] $} {}
+    timeout { puts stderr "remote tmux shell did not present a prompt"; exit 1 }
+    eof { puts stderr "remote tmux shell exited before prompt"; exit 1 }
+}
+
+send -- "python solve-remote-mux.py\r"
+expect {
+    -re {REMOTE_MUX_GDB_OK} {}
+    timeout { puts stderr "pwntools GDB did not complete through remote tmux"; exit 1 }
+    eof { puts stderr "remote tmux shell exited during GDB"; exit 1 }
+}
+expect -re {[$#] $}
+send -- "exit\r"
+expect eof

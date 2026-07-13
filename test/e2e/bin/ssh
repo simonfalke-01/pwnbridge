@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+: "${PWNBRIDGE_E2E_SSH_CONFIG:?set PWNBRIDGE_E2E_SSH_CONFIG}"
+exec /usr/bin/ssh -F "$PWNBRIDGE_E2E_SSH_CONFIG" "$@"

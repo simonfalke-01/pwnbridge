@@ -1,0 +1,1 @@
+[{"identifier":"sync_QPHUoxd7sGevWnZNPQVNuwGvbkHi2ON3Jhz0KCZveJG","version":1,"alpha":{"connected":true},"beta":{"connected":true},"mode":"two-way-safe","paused":false,"status":"watching","conflicts":[{"alphaChanges":[{"path":"solve.py"}],"betaChanges":[{"path":"solve.py"}]}],"excludedConflicts":0,"lastError":""}]

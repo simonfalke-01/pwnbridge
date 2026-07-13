@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/packaging/release/generated/
+/coverage/
+*.test
+*.out
+.DS_Store
+.idea/
+.pwnbridge/

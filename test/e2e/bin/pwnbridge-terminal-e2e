@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+import json
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+
+request = json.load(sys.stdin)
+operation = request.get("operation")
+value = request.get("value") or {}
+
+if operation == "open":
+    command = value.get("command") or []
+    if not command:
+        raise SystemExit("missing trusted pane command")
+    log_dir = os.environ.get("PWNBRIDGE_E2E_PROVIDER_LOG", tempfile.gettempdir())
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "pane-%s.log" % value.get("request_id", "unknown"))
+    log = open(log_path, "wb")
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                               stderr=subprocess.STDOUT, start_new_session=True)
+    print(json.dumps({"provider": "custom:e2e", "id": str(process.pid), "aux": log_path}))
+elif operation == "inspect":
+    pid = int(value["id"])
+    try:
+        os.kill(pid, 0)
+        exists = True
+    except ProcessLookupError:
+        exists = False
+    print(json.dumps({"Exists": exists, "Running": exists}))
+elif operation == "focus":
+    print("{}")
+elif operation == "close":
+    try:
+        os.killpg(int(value["id"]), signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    print("{}")
+else:
+    raise SystemExit("unknown provider operation: %r" % operation)
