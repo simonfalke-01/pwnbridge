@@ -141,7 +141,7 @@ Valid placements are `right`, `down`, `tab`, `floating`, and `window`, subject
 to provider capability. Sizes are percentages from `1%` through `99%`.
 
 Provider-specific Zellij/tmux sections override the general right/down and size
-selection when that provider is explicit. See
+selection whenever that provider is selected, explicitly or by `auto`. See
 [terminal-providers.md](terminal-providers.md).
 
 ### Global runtime defaults
@@ -224,6 +224,11 @@ profile = "pwn"
 PWNLIB_NOTERM = "0"
 LC_ALL = "C.UTF-8"
 ```
+
+Keys must be POSIX-style environment names (`[A-Za-z_][A-Za-z0-9_]*`), are
+limited to 128 bytes, and may not use the reserved `PWNBRIDGE_` prefix. Values
+are limited to 64 KiB and cannot contain NUL. These checks keep project config
+portable and prevent it from replacing session/broker authority.
 
 Transport-owned `SSH_*`, local `TMUX`/`ZELLIJ`, terminal metadata, and internal
 Pwnbridge values are not restored into debugger panes. Relevant `PATH`,

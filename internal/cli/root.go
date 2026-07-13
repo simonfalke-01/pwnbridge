@@ -1291,9 +1291,11 @@ func (a *App) liveSessions(localWorkspace string) ([]broker.SessionRecord, error
 		path := filepath.Join(dir, entry.Name())
 		record, loadErr := broker.LoadSession(path)
 		if loadErr != nil {
-			info, statErr := entry.Info()
-			if statErr == nil && time.Since(info.ModTime()) > time.Hour && ownedRegularFile(info) {
-				_ = os.Remove(path)
+			removed, cleanupErr := removeInvalidStaleSession(path)
+			if cleanupErr != nil {
+				return nil, cleanupErr
+			}
+			if removed {
 				continue
 			}
 			return nil, fmt.Errorf("invalid session state %s: %w", path, loadErr)
@@ -1346,10 +1348,14 @@ func (a *App) hasOtherLease(localWorkspace, excludingID string) (bool, error) {
 		if loadErr != nil {
 			// A recent unparseable record may be in the middle of an atomic
 			// replacement on an unusual filesystem. Conservatively retain the
-			// lease; old owned records are eligible for stale cleanup.
-			info, statErr := entry.Info()
-			if statErr == nil && time.Since(info.ModTime()) > time.Hour && ownedRegularFile(info) {
-				_ = os.Remove(path)
+			// lease. Old owned records are eligible for cleanup only when their
+			// kernel lease can also be acquired, which prevents PID reuse or a
+			// damaged record from hiding a still-live session.
+			removed, cleanupErr := removeInvalidStaleSession(path)
+			if cleanupErr != nil {
+				return false, cleanupErr
+			}
+			if removed {
 				continue
 			}
 			return true, nil
@@ -1458,6 +1464,48 @@ func sessionLeaseActive(record broker.SessionRecord) (bool, error) {
 func removeStaleSession(record broker.SessionRecord) {
 	_ = os.Remove(record.RecordPath)
 	_ = os.Remove(record.LeasePath)
+}
+
+func removeInvalidStaleSession(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return true, nil
+		}
+		return false, err
+	}
+	if time.Since(info.ModTime()) <= time.Hour || !ownedRegularFile(info) || info.Mode().Perm()&0o077 != 0 {
+		return false, nil
+	}
+	leasePath := path + ".lease"
+	leaseInfo, err := os.Lstat(leasePath)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !ownedRegularFile(leaseInfo) || leaseInfo.Mode().Perm()&0o077 != 0 {
+		return false, fmt.Errorf("unsafe session lease %s", leasePath)
+	}
+	lock, acquired, err := workspace.TryAcquireLock(leasePath)
+	if err != nil {
+		return false, err
+	}
+	if !acquired {
+		return false, nil
+	}
+	defer lock.Close()
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if err := os.Remove(leasePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, nil
 }
 
 func projectIgnores(root string, configured []string) ([]string, error) {

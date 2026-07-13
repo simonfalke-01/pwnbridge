@@ -366,6 +366,7 @@ Avoid an SSH library, TUI framework, RPC framework, Viper, UUID dependency, and 
 pwnbridge/
 ├── PLAN.md
 ├── README.md
+├── CONTRIBUTING.md
 ├── LICENSE
 ├── go.mod
 ├── go.sum
@@ -375,28 +376,29 @@ pwnbridge/
 │   ├── pwnbridge/
 │   └── pwnbridge-agent/
 ├── internal/
-│   ├── app/
+│   ├── agent/
+│   ├── bootstrap/
+│   ├── broker/
 │   ├── cli/
 │   ├── config/
-│   ├── host/
-│   ├── workspace/
-│   ├── transport/
-│   ├── pty/
-│   ├── syncer/
-│   ├── session/
-│   ├── shell/
-│   ├── broker/
-│   ├── terminal/provider/
-│   ├── runtime/
-│   ├── bootstrap/
-│   ├── protocol/
 │   ├── diagnostics/
-│   └── testutil/
+│   ├── fsutil/
+│   ├── identity/
+│   ├── paths/
+│   ├── protocol/
+│   ├── runtime/
+│   ├── shell/
+│   ├── syncer/
+│   ├── terminal/provider/
+│   ├── transport/
+│   ├── version/
+│   └── workspace/
 ├── docs/
-├── test/
-│   ├── integration/
-│   ├── e2e/
-│   └── fixtures/
+├── packaging/
+│   ├── container/
+│   ├── homebrew/
+│   └── release/
+├── test/e2e/
 └── .github/workflows/
 ```
 
@@ -404,29 +406,26 @@ Important interfaces:
 
 ```go
 type SyncEngine interface {
-    Ensure(context.Context, WorkspaceSpec) error
-    Resume(context.Context, WorkspaceID) error
-    Barrier(context.Context, WorkspaceID) (HealthReport, error)
-    Status(context.Context, WorkspaceID) (HealthReport, error)
-    Pause(context.Context, WorkspaceID) error
-    Terminate(context.Context, WorkspaceID) error
+    Ensure(context.Context, Spec, *workspace.State) error
+    Resume(context.Context, string) error
+    Barrier(context.Context, string) (HealthReport, error)
+    Status(context.Context, string) (HealthReport, error)
+    Pause(context.Context, string) error
+    Terminate(context.Context, string) error
 }
 
 type TerminalProvider interface {
-    Detect(context.Context, HostContext) (Capabilities, int, error)
-    Open(context.Context, PaneSpec) (PaneHandle, error)
-    Inspect(context.Context, PaneHandle) (PaneState, error)
-    Focus(context.Context, PaneHandle) error
-    Close(context.Context, PaneHandle) error
-}
-
-type Runtime interface {
-    Ensure(context.Context, RuntimeSpec) (RuntimeHandle, error)
-    Exec(context.Context, RuntimeHandle, ExecRequest) error
-    Stop(context.Context, RuntimeHandle) error
-    Inspect(context.Context, RuntimeHandle) (RuntimeState, error)
+    Detect(context.Context) (Capabilities, int, error)
+    Open(context.Context, Spec) (Handle, error)
+    Inspect(context.Context, Handle) (State, error)
+    Focus(context.Context, Handle) error
+    Close(context.Context, Handle) error
 }
 ```
+
+Runtime selection remains a small set of package functions over a typed
+`RuntimeSpec`; it does not need a framework-style interface until another
+runtime family exists.
 
 ## 8. Synchronization and command barriers
 
@@ -502,7 +501,12 @@ python3 python3-dev python3-venv python3-pip python3-pwntools libssl-dev libffi-
 strace ltrace socat netcat-openbsd libc6-dbg
 ```
 
-It creates a user-owned virtual environment with pinned pwntools 4.15.0. Pwndbg or GEF is optional. Bootstrap checks distro, amd64 architecture, disk/inodes, home/workspace permissions, forwarding, ptrace, GDB, gdbserver, and any configured container engine. Without sudo it still deploys the agent and reports exact missing tools.
+It creates a user-owned virtual environment with pinned pwntools 4.15.0. The
+checksum-verified Pwndbg profile is optional; any existing GEF/PEDA setup stays
+user-owned and isolated from it. Bootstrap checks distro, amd64 architecture,
+disk/inodes, home/workspace permissions, forwarding, ptrace, GDB, gdbserver,
+and any configured container engine. Without sudo it still deploys the agent
+and reports exact missing tools.
 
 ## 10. Pwntools and terminal broker
 
@@ -549,13 +553,21 @@ explicit provider
 → host tmux
 → current supported terminal application
 → macOS Terminal.app
-→ explicit remote multiplexer
 → actionable error
 ```
 
-Built-ins are Zellij, tmux, WezTerm, Kitty, iTerm2, Terminal.app, explicit remote Zellij/tmux, and a custom provider executable named `pwnbridge-terminal-<name>`. Custom providers exchange versioned JSON and receive only the trusted local pane helper, never remote argv.
+Remote Zellij/tmux scope is an explicit configuration choice rather than a
+silent fallback, because it changes the presentation model and may create a
+nested multiplexer. Built-ins are Zellij, tmux, WezTerm, Kitty, iTerm2,
+Terminal.app, explicit remote Zellij/tmux, and a custom provider executable
+named `pwnbridge-terminal-<name>`. Custom providers exchange versioned JSON and
+receive only the trusted local pane helper, never remote argv.
 
-Zellij supports right, down, tab, floating, stable returned pane IDs, origin targeting, feature probing, and rename recovery. tmux supports right, down, window, stable `%pane_id`, direct multi-argument invocation, and idempotent close. Terminal.app is the zero-configuration fallback via a private generated `.command` containing only the local helper.
+Zellij supports right, down, tab, floating, stable returned pane IDs, origin
+targeting, feature probing, structured inspection, focus, and close. tmux
+supports right, down, window, stable `%pane_id`, direct multi-argument
+invocation, focus, and idempotent close. Terminal.app is the zero-configuration
+fallback via a private generated `.command` containing only the local helper.
 
 Local `$ZELLIJ*`, `$TMUX`, and `$TMUX_PANE` are never forwarded remotely.
 
@@ -581,7 +593,9 @@ Docker and Podman share one adapter. A session uses one long-lived named contain
 - Network loss restores the terminal and preserves both workspaces.
 - Mutagen crashes cause isolated daemon restart and full session revalidation.
 - Conflicts, root deletion, disk full, and permission errors block execution without automatic reset.
-- Stale entries are removed only inside owned directories after ownership and age validation.
+- A kernel advisory lease, not PID existence alone, proves that a session is
+  live; even old corrupt records are removed only after ownership, age, and
+  non-blocking lease acquisition validate them as stale.
 - Version mismatch uploads the matching content-addressed agent.
 - Interrupted bootstrap is idempotently resumable.
 - No workspace is removed without explicit `clean --remote` authorization.
@@ -655,8 +669,8 @@ These are dependency-ordered parts of one complete target.
 - `gdb.debug()`, `gdb.attach()`, process attach, and `api=True`.
 - Virtualenv, `LD_PRELOAD`, scripts, and temporary executables.
 - Every parent/GDB/pane/broker exit order, duplicate cancellation, and two debuggers.
-- Zellij right/down/tab/floating, focus, rename, close, and hold.
-- tmux right/down/window, origin, rename, movement, and kill.
+- Zellij right/down/tab/floating, structured inspect, focus, close, and hold.
+- tmux right/down/window, origin, stable handles, focus, and kill.
 - WezTerm, Kitty, iTerm2, Terminal.app, custom, and no-multiplexer flows.
 - Unix forwarding, TCP fallback, authentication failures, flood, and pane caps.
 - Malicious remote metadata cannot alter local argv.
@@ -750,10 +764,10 @@ agent, broker, and runtime paths used by the CLI were exercised.
 
 | Area | Acceptance evidence |
 |---|---|
-| Go implementation | `go test ./...`, `go vet ./...`, cross-builds, and `go test -race ./...` pass; native fuzz targets cover strict TOML, framed protocol, shell markers, Mutagen health JSON, ignore parsing, and workspace slugs |
+| Go implementation | `go test ./...`, `go vet ./...`, cross-builds, and `go test -race ./...` pass on the supported Go 1.25.12 and 1.26.5 lines; native fuzz targets cover strict TOML, framed protocol, shell markers, Mutagen health JSON, ignore parsing, and workspace slugs |
 | Synchronization | Real two-way-safe initial sync, save-before-run barriers, executable bits, portable symlinks, Unicode, remote deletion, endpoint permission failure/recovery, conflicts (including spaces), explicit resolution backups, and remote-root deletion protection pass |
 | PTY lifecycle | Readline, bracketed paste, Ctrl-C/Z/D, job control, alternate-screen bytes, resize, prompt barriers, disconnect restoration, reconnect, and artifact return pass in real PTYs |
-| Pwntools/GDB | pwntools 4.15.0 and pinned 5-dev exercise `gdb.debug()`, process attach, `api=True`, and concurrent debuggers; Pwndbg 2026.02.18 and GDB TUI/resize pass |
+| Pwntools/GDB | pwntools 4.15.0 and pinned 5-dev commit `6571ec7de50d3c8fc235fad2a27bcdb07ca87acf` exercise `gdb.debug()`, process attach, `api=True`, and concurrent debuggers; Pwndbg 2026.02.18 and GDB TUI/resize pass |
 | Terminal integration | Zellij 0.44.3 and tmux 3.6a host panes pass; custom-provider PTYs and explicit remote tmux pass; remote tmux remains correct in the presence of a stale unrelated tmux server because each managed session has a private server/socket |
 | Runtime coverage | Direct Ubuntu amd64 and Podman container execution pass; solve process, gdbserver, GDB, wrapper, and API bridge remain in the intended runtime namespace |
 | Degradation and recovery | Reverse-forwarding denial degrades ordinary shell/run cleanly and retains explicit remote-multiplexer GDB; live SSH-master termination restores the host terminal and preserves/reconciles data; `pwnbridge stop` terminates leased sessions safely |

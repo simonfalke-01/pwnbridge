@@ -47,8 +47,9 @@ idempotent.
 ## Zellij
 
 Zellij is first-class and supports `right`, `down`, `tab`, and `floating`.
-Pwnbridge invokes the CLI with an argv array, captures stable pane IDs where the
-version provides them, and has rename/list recovery for ID output differences.
+Pwnbridge invokes the CLI with an argv array, captures the stable pane/tab ID
+returned by current Zellij, and uses structured `list-panes`/`list-tabs` JSON
+for inspection and focus.
 
 ```toml
 [terminal]

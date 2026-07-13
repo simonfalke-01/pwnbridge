@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pwnbridge/pwnbridge/internal/broker"
 	"github.com/pwnbridge/pwnbridge/internal/config"
@@ -239,6 +240,54 @@ func TestBrokerlessSessionUsesOwnerLeaseAndOmitsCredentials(t *testing.T) {
 	sessions, err = app.liveSessions(localWorkspace)
 	if err != nil || len(sessions) != 0 {
 		t.Fatalf("unlocked stale session survived PID reuse guard: sessions=%#v err=%v", sessions, err)
+	}
+}
+
+func TestInvalidOldSessionRecordCannotHideLiveKernelLease(t *testing.T) {
+	app, _ := testApp(t)
+	recordPath := filepath.Join(app.Paths.State, "sessions", "0123456789abcdef.json")
+	leasePath := recordPath + ".lease"
+	lease, err := workspace.AcquireLock(leasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte("not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(recordPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.liveSessions(t.TempDir()); err == nil {
+		t.Fatal("invalid record with a live kernel lease was silently removed")
+	}
+	if _, err := os.Stat(recordPath); err != nil {
+		t.Fatalf("live invalid record was removed: %v", err)
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := app.liveSessions(t.TempDir()); err != nil || len(sessions) != 0 {
+		t.Fatalf("inactive invalid record was not cleaned: sessions=%#v err=%v", sessions, err)
+	}
+	for _, path := range []string{recordPath, leasePath} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale path %s survived cleanup: %v", path, err)
+		}
+	}
+
+	orphanPath := filepath.Join(app.Paths.State, "sessions", "fedcba9876543210.json")
+	if err := os.WriteFile(orphanPath, []byte("also-not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(orphanPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if sessions, err := app.liveSessions(t.TempDir()); err != nil || len(sessions) != 0 {
+		t.Fatalf("old invalid record without a lease was not cleaned: sessions=%#v err=%v", sessions, err)
+	}
+	if _, err := os.Stat(orphanPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphan invalid record survived cleanup: %v", err)
 	}
 }
 
