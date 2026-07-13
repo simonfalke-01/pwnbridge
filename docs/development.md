@@ -100,10 +100,10 @@ make snapshot
 
 A snapshot must contain two Darwin client archives, the Linux amd64 agent
 archive, the Linux agent adjacent inside each client archive, README/PLAN/docs,
-three completions, checksums, and archive SBOMs. Go outputs use the commit
-timestamp and `-trimpath`; archive entries use a fixed non-zero epoch so even a
-local checkout without a configured Git remote produces byte-identical tarballs.
-Tagged builds still embed version/commit/date ldflags.
+three completions, checksums, and archive SBOMs. Go outputs use `-trimpath` and
+fixed file mtimes; archive entries use the same non-zero epoch so even a local
+checkout without a configured Git remote produces byte-identical tarballs.
+Tagged builds still embed their real version, commit, and date through ldflags.
 
 The release workflow creates draft GitHub releases and attestations. A separate
 workflow publishes an amd64 container image with BuildKit provenance, SBOM, and
