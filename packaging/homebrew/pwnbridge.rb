@@ -5,15 +5,15 @@
 class Pwnbridge < Formula
   desc "Make a remote Linux x86-64 pwn environment feel local on macOS"
   homepage "https://github.com/simonfalke-01/pwnbridge"
-  version "0.1.2"
+  version "0.1.3"
   license "MIT"
 
   if Hardware::CPU.arm?
-    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.2/pwnbridge_0.1.2_darwin_arm64.tar.gz"
-    sha256 "223e3948078d419aee9980cc3d490b283d289591d0be0659a95f41c04fd45f5d"
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.3/pwnbridge_0.1.3_darwin_arm64.tar.gz"
+    sha256 "a3b0f915d2a7004aaee9407f0ed4a2341fbb02e1966fe7067588e1e8a74afe9c"
   else
-    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.2/pwnbridge_0.1.2_darwin_amd64.tar.gz"
-    sha256 "ff57e1c37f355514af3b8d2e67ce9ab0c68e1c4affdb0366abed1a83eb47d518"
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.3/pwnbridge_0.1.3_darwin_amd64.tar.gz"
+    sha256 "d6cb72f8b7b75a9d8fdad10d423cb86c7b32b6644cc149a9c98a14a9c2d58809"
   end
 
   depends_on "mutagen-io/mutagen/mutagen"
