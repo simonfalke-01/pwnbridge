@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
@@ -131,6 +132,19 @@ func TestRejectsUnsafeExecutionConfiguration(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+func TestValidHostName(t *testing.T) {
+	for _, name := range []string{"x86", "pwn-box_2", "lab.example"} {
+		if !ValidHostName(name) {
+			t.Errorf("ValidHostName(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"", "has space", "../escape", "line\nbreak", "πwn", strings.Repeat("a", 65)} {
+		if ValidHostName(name) {
+			t.Errorf("ValidHostName(%q) = true", name)
+		}
 	}
 }
 

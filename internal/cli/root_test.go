@@ -61,6 +61,28 @@ func TestHostLifecycle(t *testing.T) {
 	}
 }
 
+func TestHostAddRejectsInvalidInputWithoutWriting(t *testing.T) {
+	app, _ := testApp(t)
+	cwd := t.TempDir()
+	old, _ := os.Getwd()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+
+	for _, args := range [][]string{
+		{"host", "add", "../escape", "user@example"},
+		{"host", "add", "x86", "-oProxyCommand=bad"},
+	} {
+		if err := execute(t, app, args...); err == nil {
+			t.Fatalf("expected %q to be rejected", args)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(app.Paths.Config, "config.toml")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid host add wrote configuration: %v", err)
+	}
+}
+
 func TestInitIsNonDestructive(t *testing.T) {
 	app, _ := testApp(t)
 	cwd := t.TempDir()

@@ -629,12 +629,20 @@ func (a *App) hostAdd() *cobra.Command {
 			return err
 		}
 		name := args[0]
-		if strings.ContainsAny(name, " /\\") {
-			return errors.New("host name may contain no whitespace or slashes")
+		if !config.ValidHostName(name) {
+			return errors.New("host name must be 1-64 ASCII letters, digits, '.', '_', or '-'")
 		}
 		e.Config.Global.Hosts[name] = config.Host{Destination: args[1], Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn"}
 		if e.Config.Global.DefaultHost == "" {
 			e.Config.Global.DefaultHost = name
+		}
+		// Validate the complete post-mutation configuration before writing it. In
+		// particular, this rejects OpenSSH option injection in DESTINATION and
+		// ensures host add can never persist a config that the next command cannot
+		// load.
+		e.Config.SelectedHost = e.Config.Global.DefaultHost
+		if err := e.Config.Validate(); err != nil {
+			return err
 		}
 		if err := config.SaveGlobal(e.Config.GlobalPath, e.Config.Global); err != nil {
 			return err

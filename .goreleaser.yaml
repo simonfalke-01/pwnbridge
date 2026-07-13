@@ -45,7 +45,7 @@ archives:
       - PLAN.md
       - CONTRIBUTING.md
       - LICENSE
-      - docs/**/*
+      - docs/*.md
       - src: packaging/release/generated/*
         dst: completions
         strip_parent: true

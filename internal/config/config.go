@@ -573,7 +573,7 @@ func (e Effective) Validate() error {
 		}
 	}
 	for name, host := range e.Global.Hosts {
-		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, " /\\") {
+		if !ValidHostName(name) {
 			problems = append(problems, fmt.Sprintf("invalid host name %q", name))
 		}
 		if host.Destination == "" {
@@ -591,6 +591,21 @@ func (e Effective) Validate() error {
 		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
+}
+
+// ValidHostName reports whether name is safe to use as a stable configuration
+// key, binding identifier, and diagnostic label. Keep this deliberately narrow:
+// destinations carry the user's SSH alias, while names are local identifiers.
+func ValidHostName(name string) bool {
+	if name == "" || len(name) > 64 {
+		return false
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func oneOf(value string, allowed ...string) bool {

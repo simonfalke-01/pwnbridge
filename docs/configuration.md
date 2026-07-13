@@ -87,7 +87,8 @@ Hostnames, users, ports, ProxyJump, and identity files belong in SSH config,
 not in portable `.pwnbridge.toml` files.
 
 Only `linux/amd64` is supported. Workspace roots default below the remote
-user's home. Host names may not contain whitespace or path separators.
+user's home. Host names are 1-64 ASCII letters, digits, dots, underscores, or
+hyphens; SSH destination aliases may be more descriptive.
 
 Use these commands rather than hand-editing host records:
 
