@@ -772,7 +772,7 @@ agent, broker, and runtime paths used by the CLI were exercised.
 | Runtime coverage | Direct Ubuntu amd64 and Podman container execution pass; solve process, gdbserver, GDB, wrapper, and API bridge remain in the intended runtime namespace |
 | Degradation and recovery | Reverse-forwarding denial degrades ordinary shell/run cleanly and retains explicit remote-multiplexer GDB; live SSH-master termination restores the host terminal and preserves/reconciles data; `pwnbridge stop` terminates leased sessions safely |
 | Security and quality | `gosec` passes under the documented deliberate exclusions; `govulncheck` reports no reachable vulnerabilities; ShellCheck, actionlint, workflow YAML parsing, Python syntax, Ruby syntax, and Homebrew style pass |
-| Distribution | GoReleaser emits Darwin arm64/amd64 clients plus a static Linux amd64 agent, documentation, completions, checksums, and SPDX 2.3 SBOMs; checksums verify and two tag-context builds produce byte-identical archives |
+| Distribution | GoReleaser emits Darwin arm64/amd64 clients plus a static Linux amd64 agent, documentation, completions, checksums, and SPDX 2.3 SBOMs; archive entries use a fixed non-zero epoch, checksums verify, and two clean builds produce byte-identical archives even without a configured Git remote |
 
 The CI and release workflows repeat the deterministic gates, publish draft
 tag releases, attach checksum-based GitHub attestations, and publish the
