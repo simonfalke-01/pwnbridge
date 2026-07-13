@@ -285,8 +285,8 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 		SessionID: b.Record.ID, RequestID: open.RequestID, Cwd: b.Record.LocalWorkspace,
 		Title: safeTitle(payload.Title), Placement: placement, Size: size, Focus: b.Record.Focus,
 		CloseOnSuccess: b.Record.CloseOnSuccess, HoldOnFailure: b.Record.HoldOnFailure,
-		NearCurrentPane: b.Record.ZellijNearCurrentPane,
-		Command:         []string{b.Record.Executable, "__pane", "--record", b.Record.RecordPath, "--session", b.Record.ID, "--request", open.RequestID},
+		NearCurrentPane: b.Record.ZellijNearCurrentPane, RequireVisible: true,
+		Command: []string{b.Record.Executable, "__pane", "--record", b.Record.RecordPath, "--session", b.Record.ID, "--request", open.RequestID},
 	}
 	handle, err := terminalProvider.Open(context.Background(), spec)
 	if err != nil {

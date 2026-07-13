@@ -57,6 +57,7 @@ func TestZellijProviderLayoutsAndLifecycle(t *testing.T) {
 for arg in "$@"; do printf '<%s>' "$arg" >> "$PWNBRIDGE_PROVIDER_TEST_LOG"; done
 printf '\n' >> "$PWNBRIDGE_PROVIDER_TEST_LOG"
 case "$*" in
+  *"current-tab-info --json"*) printf '{"tab_id":9}' ;;
   *"list-tabs --json"*) printf '[{"position":1,"tab_id":9}]' ;;
   *"list-panes --json"*) printf '[{"id":7,"is_plugin":false,"exited":false,"tab_id":9,"tab_position":1}]' ;;
   *"new-tab"*) printf '9\n' ;;
@@ -68,7 +69,7 @@ esac
 	t.Setenv("ZELLIJ", "0")
 	t.Setenv("ZELLIJ_SESSION_NAME", "")
 	p := Zellij{}
-	base := Spec{Cwd: "/tmp/work space", Title: "debug", Size: "50%", Focus: true, CloseOnSuccess: true, NearCurrentPane: true, Command: []string{"printf", "a b"}}
+	base := Spec{Cwd: "/tmp/work space", Title: "debug", Size: "50%", Focus: true, CloseOnSuccess: true, NearCurrentPane: true, RequireVisible: true, Command: []string{"printf", "a b"}}
 	for _, placement := range []string{"right", "down", "floating"} {
 		spec := base
 		spec.Placement = placement
@@ -100,10 +101,39 @@ esac
 		t.Fatal(err)
 	}
 	log := string(logData)
-	for _, wanted := range []string{"<--near-current-pane><--direction><right>", "<--direction><down>", "<--floating>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
+	for _, wanted := range []string{"<current-tab-info><--json>", "<--tab-id><9><--direction><right>", "<--direction><down>", "<--floating>", "<focus-pane-id><terminal_7>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
 		if !strings.Contains(log, wanted) {
 			t.Fatalf("missing %q in Zellij calls:\n%s", wanted, log)
 		}
+	}
+	if strings.Contains(log, "<--near-current-pane>") {
+		t.Fatalf("Zellij near-current-pane regression returned: %s", log)
+	}
+}
+
+func TestZellijLiveNearCurrentPane(t *testing.T) {
+	session := os.Getenv("PWNBRIDGE_TEST_ZELLIJ_SESSION")
+	if session == "" {
+		t.Skip("set PWNBRIDGE_TEST_ZELLIJ_SESSION for live Zellij integration")
+	}
+	t.Setenv("ZELLIJ", "0")
+	t.Setenv("ZELLIJ_SESSION_NAME", session)
+	if os.Getenv("ZELLIJ_PANE_ID") == "" {
+		t.Setenv("ZELLIJ_PANE_ID", "0")
+	}
+	p := Zellij{}
+	handle, err := p.Open(context.Background(), Spec{
+		Cwd: t.TempDir(), Title: "pwnbridge live test", Placement: "right",
+		Focus: false, CloseOnSuccess: true, NearCurrentPane: true, RequireVisible: true,
+		Command: []string{"/bin/sh", "-c", "sleep 10"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close(context.Background(), handle)
+	state, err := p.Inspect(context.Background(), handle)
+	if err != nil || !state.Exists || !state.Running {
+		t.Fatalf("live pane state=%#v err=%v", state, err)
 	}
 }
 

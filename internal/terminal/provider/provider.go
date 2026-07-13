@@ -39,6 +39,7 @@ type Spec struct {
 	CloseOnSuccess  bool     `json:"close_on_success"`
 	HoldOnFailure   bool     `json:"hold_on_failure"`
 	NearCurrentPane bool     `json:"near_current_pane,omitempty"`
+	RequireVisible  bool     `json:"require_visible,omitempty"`
 	Command         []string `json:"command"`
 }
 
@@ -153,10 +154,8 @@ func (Zellij) Detect(_ context.Context) (Capabilities, int, error) {
 	return Capabilities{Name: "zellij", Available: available, Placements: []string{"right", "down", "tab", "floating"}, CanFocus: true, CanClose: true, Reason: reason}, boolScore(available, 100), nil
 }
 func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
-	args := []string{}
-	if session := os.Getenv("ZELLIJ_SESSION_NAME"); session != "" {
-		args = append(args, "--session", session)
-	}
+	prefix := zellijSessionPrefix()
+	args := append([]string{}, prefix...)
 	if spec.Placement == "tab" {
 		args = append(args, "action", "new-tab", "--cwd", spec.Cwd, "--name", cleanTitle(spec.Title))
 		if spec.CloseOnSuccess {
@@ -173,7 +172,14 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 		args = append(args, "--floating")
 	} else {
 		if spec.NearCurrentPane {
-			args = append(args, "--near-current-pane")
+			// Zellij 0.44.3 can return a terminal ID for
+			// --near-current-pane while leaving that pane detached from the
+			// visible layout. Resolve the caller's stable tab explicitly instead.
+			tabID, err := currentZellijTabID(ctx, prefix)
+			if err != nil {
+				return Handle{}, err
+			}
+			args = append(args, "--tab-id", strconv.Itoa(tabID))
 		}
 		args = append(args, "--direction", direction(spec.Placement))
 	}
@@ -183,7 +189,78 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 	}
 	args = append(args, "--")
 	args = append(args, spec.Command...)
-	return runOpen(ctx, "zellij", args, "zellij")
+	handle, err := runOpen(ctx, "zellij", args, "zellij")
+	if err != nil {
+		return Handle{}, err
+	}
+	if spec.RequireVisible {
+		if err := waitForZellijPane(ctx, prefix, handle.ID); err != nil {
+			return Handle{}, err
+		}
+		focusID := handle.ID
+		if !spec.Focus {
+			if origin := os.Getenv("ZELLIJ_PANE_ID"); origin != "" {
+				focusID = "terminal_" + strings.TrimPrefix(origin, "terminal_")
+			}
+		}
+		if focusID != "" {
+			focusArgs := append(append([]string{}, prefix...), "action", "focus-pane-id", focusID)
+			if output, focusErr := exec.CommandContext(ctx, "zellij", focusArgs...).CombinedOutput(); focusErr != nil {
+				return Handle{}, fmt.Errorf("zellij focus pane %s: %w: %s", focusID, focusErr, strings.TrimSpace(string(output)))
+			}
+		}
+	}
+	return handle, nil
+}
+
+func zellijSessionPrefix() []string {
+	if session := os.Getenv("ZELLIJ_SESSION_NAME"); session != "" {
+		return []string{"--session", session}
+	}
+	return nil
+}
+
+func currentZellijTabID(ctx context.Context, prefix []string) (int, error) {
+	args := append(append([]string{}, prefix...), "action", "current-tab-info", "--json")
+	out, err := exec.CommandContext(ctx, "zellij", args...).CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("query current Zellij tab: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	var tab struct {
+		ID int `json:"tab_id"`
+	}
+	if err := json.Unmarshal(out, &tab); err != nil {
+		return 0, fmt.Errorf("decode current Zellij tab: %w", err)
+	}
+	return tab.ID, nil
+}
+
+func waitForZellijPane(ctx context.Context, prefix []string, handleID string) error {
+	id, err := strconv.Atoi(strings.TrimPrefix(handleID, "terminal_"))
+	if err != nil {
+		return fmt.Errorf("invalid Zellij pane id %q", handleID)
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		args := append(append([]string{}, prefix...), "action", "list-panes", "--json")
+		out, listErr := exec.CommandContext(ctx, "zellij", args...).Output()
+		if listErr == nil {
+			var panes []zellijPane
+			if decodeErr := json.Unmarshal(out, &panes); decodeErr != nil {
+				return fmt.Errorf("decode Zellij panes: %w", decodeErr)
+			}
+			for _, pane := range panes {
+				if pane.ID == id && !pane.Plugin {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("Zellij returned pane %s but it never became visible", handleID)
 }
 func (Zellij) Inspect(ctx context.Context, h Handle) (State, error) {
 	if h.Aux == "tab" {
