@@ -1199,6 +1199,7 @@ func (a *App) hostBootstrap() *cobra.Command {
 				return wizardErr
 			}
 			value, explanations, options.Yes = wizard.Recipe, wizard.Plan.Explanations, true
+			options.PlanPrinted = true
 			options.AcceptDockerRootRisk = wizard.AcceptDockerRisk
 			if wizard.SaveName != "" && saveProfile == "" {
 				saveProfile = wizard.SaveName

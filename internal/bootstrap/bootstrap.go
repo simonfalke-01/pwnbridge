@@ -17,6 +17,7 @@ import (
 
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 	"github.com/simonfalke-01/pwnbridge/internal/transport"
+	"golang.org/x/term"
 )
 
 // Packages remains the exact apt package set installed by the historical pwn
@@ -42,6 +43,7 @@ type Options struct {
 	Verbose                    bool
 	JSON                       bool
 	Accessible                 bool
+	PlanPrinted                bool
 	Recipe                     Recipe
 	Inventory                  *Inventory
 	Explanations               []string
@@ -124,7 +126,7 @@ func RunResult(ctx context.Context, client transport.Client, options Options) (R
 		return Result{}, err
 	}
 	result := Result{DryRun: options.DryRun, Plan: resolved, Elapsed: time.Since(started), LogPath: options.LogPath}
-	if !options.JSON {
+	if !options.JSON && !options.PlanPrinted {
 		PrintPlan(options.Output, resolved)
 	}
 	if options.DryRun {
@@ -226,6 +228,7 @@ func RunResult(ctx context.Context, client transport.Client, options Options) (R
 func PrintPlan(out io.Writer, plan ResolvedPlan) {
 	fmt.Fprintf(out, "Host: %s  Distro: %s %s  Package manager: %s  Arch: %s  libc: %s\n", plan.Inventory.Host, plan.Inventory.Distro, plan.Inventory.DistroVersion, plan.Inventory.PackageManager, plan.Inventory.Architecture, plan.Inventory.Libc)
 	fmt.Fprintf(out, "Disk: %d KiB  Inodes: %d  Privilege: root=%t sudo=%t  Recipe: %s\n", plan.Inventory.DiskAvailableKiB, plan.Inventory.InodesAvailable, plan.Inventory.Root, plan.Inventory.SudoAvailable, plan.Recipe.Name)
+	fmt.Fprintln(out)
 	for _, action := range plan.Actions {
 		fmt.Fprintf(out, "  %-11s %-14s %s", action.State, action.Component, action.Detail)
 		if len(action.Packages) > 0 {
@@ -240,11 +243,13 @@ func PrintPlan(out io.Writer, plan ResolvedPlan) {
 		fmt.Fprintln(out, "  unsupported: "+blocker)
 	}
 	if len(plan.Steps) > 0 {
+		fmt.Fprintln(out)
 		fmt.Fprintln(out, "Exact steps:")
 		for _, step := range plan.Steps {
 			fmt.Fprintln(out, "  "+renderCommand(step, plan.Inventory.Root))
 		}
 	}
+	fmt.Fprintln(out)
 }
 
 func RenderScript(plan ResolvedPlan, root bool) string {
@@ -333,6 +338,7 @@ type progressWriter struct {
 	buffer    bytes.Buffer
 	quiet     bool
 	auth      bool
+	inline    bool
 }
 
 func newProgress(steps []Step, target io.Writer, quiet bool) *progressWriter {
@@ -340,7 +346,11 @@ func newProgress(steps []Step, target io.Writer, quiet bool) *progressWriter {
 	for i, step := range steps {
 		ids[i] = step.ID
 	}
-	return &progressWriter{target: target, pending: ids, quiet: quiet}
+	inline := false
+	if output, ok := target.(interface{ Fd() uintptr }); ok {
+		inline = term.IsTerminal(int(output.Fd()))
+	}
+	return &progressWriter{target: target, pending: ids, quiet: quiet, inline: inline}
 }
 func (p *progressWriter) Write(data []byte) (int, error) {
 	p.mu.Lock()
@@ -366,7 +376,7 @@ func (p *progressWriter) Write(data []byte) (int, error) {
 			}
 		}
 		if p.auth && !strings.HasPrefix(clean, "__PWNBRIDGE_EVENT__") {
-			_, _ = fmt.Fprintln(p.target, clean)
+			p.writeLine(strings.TrimRight(clean, "\r\n"))
 			continue
 		}
 		if !strings.HasPrefix(clean, "__PWNBRIDGE_EVENT__") {
@@ -389,24 +399,32 @@ func (p *progressWriter) handleEvent(fields []string) {
 	case "auth":
 		p.auth = true
 		if !p.quiet {
-			fmt.Fprintln(p.target, "  [auth] "+description)
+			p.writeLine("  [auth] " + description)
 		}
 	case "start":
 		p.auth = false
-		if !p.quiet {
-			fmt.Fprintln(p.target, "  [ ] "+description)
+		if !p.quiet && p.inline {
+			fmt.Fprintf(p.target, "\r\x1b[2K  [·] %s", description)
 		}
 	case "done":
 		p.completed = append(p.completed, fields[1])
 		p.removePending(fields[1])
 		if !p.quiet {
-			fmt.Fprintln(p.target, "  [✓] "+description)
+			p.writeLine("  [✓] " + description)
 		}
 	case "failed":
 		if !p.quiet {
-			fmt.Fprintln(p.target, "  [!] "+description)
+			p.writeLine("  [!] " + description)
 		}
 	}
+}
+
+func (p *progressWriter) writeLine(value string) {
+	if p.inline {
+		fmt.Fprintf(p.target, "\r\x1b[2K%s\r\n", value)
+		return
+	}
+	fmt.Fprintln(p.target, value)
 }
 func (p *progressWriter) removePending(id string) {
 	for i, value := range p.pending {

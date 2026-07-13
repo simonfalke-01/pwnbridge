@@ -89,6 +89,27 @@ func TestHealthyRerunIsNoOp(t *testing.T) {
 	}
 }
 
+func TestPrintPlanSeparatesSummaryActionsStepsAndFollowingContent(t *testing.T) {
+	plan := ResolvedPlan{
+		Recipe:    Recipe{Name: "pwn"},
+		Inventory: Inventory{Host: "lab", Distro: "ubuntu", PackageManager: ManagerAPT, Architecture: "amd64"},
+		Actions:   []Action{{State: ActionSkip, Component: ComponentCore, Detail: "already healthy"}},
+		Steps:     []Step{{ID: "install", Argv: []string{"apt-get", "install", "gdb"}}},
+	}
+	var output bytes.Buffer
+	PrintPlan(&output, plan)
+	got := output.String()
+	for _, boundary := range []string{
+		"Recipe: pwn\n\n  skip",
+		"already healthy\n\nExact steps:",
+		"'apt-get' 'install' 'gdb'\n\n",
+	} {
+		if !strings.Contains(got, boundary) {
+			t.Errorf("plan output lacks boundary %q:\n%s", boundary, got)
+		}
+	}
+}
+
 func TestExtraPackageDedupAndPipOptionRejection(t *testing.T) {
 	value, _ := BuiltinRecipe("minimal")
 	value.SystemPackages = []string{"gdb", "gdb"}
@@ -142,6 +163,36 @@ func TestStructuredEventsTrackResumeState(t *testing.T) {
 	}
 	if strings.Contains(display.String(), "\x1b") {
 		t.Fatal("structured output injected terminal controls")
+	}
+	if got := display.String(); got != "  [✓] First\n" {
+		t.Fatalf("non-terminal progress should emit one aligned final row, got %q", got)
+	}
+}
+
+func TestInlineProgressReplacesPendingRowAndReturnsToColumnZero(t *testing.T) {
+	var display bytes.Buffer
+	tracker := newProgress([]Step{{ID: "pwndbg-install"}}, &display, false)
+	tracker.inline = true
+	tracker.handleEvent([]string{"start", "pwndbg-install", "Install verified portable Pwndbg"})
+	tracker.handleEvent([]string{"done", "pwndbg-install", "Install verified portable Pwndbg"})
+	want := "\r\x1b[2K  [·] Install verified portable Pwndbg" +
+		"\r\x1b[2K  [✓] Install verified portable Pwndbg\r\n"
+	if got := display.String(); got != want {
+		t.Fatalf("inline progress = %q, want %q", got, want)
+	}
+}
+
+func TestRunResultDoesNotReprintReviewedPlan(t *testing.T) {
+	value, _ := BuiltinRecipe("minimal")
+	inventory := Inventory{OS: "linux", Architecture: "amd64", Distro: "ubuntu", PackageManager: ManagerAPT, HomeWritable: true, SudoAvailable: true}
+	var output bytes.Buffer
+	if _, err := RunResult(context.Background(), transport.Client{}, Options{
+		DryRun: true, PlanPrinted: true, Recipe: value, Inventory: &inventory, Output: &output,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("reviewed plan was printed again: %q", output.String())
 	}
 }
 

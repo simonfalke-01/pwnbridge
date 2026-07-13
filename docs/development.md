@@ -141,7 +141,7 @@ internal/broker/        authenticated debugger lifecycle broker
 internal/terminal/      host provider implementations
 internal/runtime/       host and Docker/Podman adapters
 internal/bootstrap/     typed recipes, inventory, distro adapters, planner/executor
-internal/bootstrap/ui/  client-only inline Huh wizard
+internal/bootstrap/ui/  client-only inline Bubble Tea v2 wizard
 internal/agent/         Linux execution, wrapper, pane, structured protocol
 packaging/              container, Homebrew, and release helpers
 test/e2e/               real amd64 acceptance scenarios

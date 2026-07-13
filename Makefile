@@ -39,7 +39,7 @@ cross-build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -o bin/cross/pwnbridge-agent-linux-amd64 ./cmd/pwnbridge-agent
 	test "$$(wc -c < bin/cross/pwnbridge-darwin-arm64)" -le 16777216
 	test "$$(wc -c < bin/cross/pwnbridge-darwin-amd64)" -le 16777216
-	! $(GO) list -deps ./cmd/pwnbridge-agent | grep -E 'charm.land/(huh|bubbletea|lipgloss)'
+	! $(GO) list -deps ./cmd/pwnbridge-agent | grep -E 'charm.land/(bubbles|bubbletea|lipgloss)'
 
 verify: fmt-check
 	$(GO) mod verify

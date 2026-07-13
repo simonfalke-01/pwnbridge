@@ -49,8 +49,9 @@ remain cached for fast future invocations.
 
 Bootstrap is independent of project selection and runtime configuration. A
 read-only SSH inventory feeds its typed recipe planner and host doctor. The
-client-only Huh adapter renders an inline wizard; execution uses one ordinary
-SSH PTY so visible `sudo -v` authentication is shared by fixed-argv steps.
+client-only Bubble Tea v2 adapter renders a purpose-built inline wizard;
+execution uses one ordinary SSH PTY so visible `sudo -v` authentication is
+shared by fixed-argv steps.
 Complete logs live under XDG state and displayed output is control-sanitized.
 
 ## Workspace identity and state
@@ -180,7 +181,9 @@ are single-quoted.
 Protocol 3 adds a structured bootstrap request and newline JSON event stream.
 The client sends discrete argv/environment fields through one SSH PTY; the
 agent emits authentication, start, output, completion, and failure events.
-Huh remains confined to the Darwin client dependency graph.
+Bubble Tea, Bubbles, and Lip Gloss remain confined to the Darwin client
+dependency graph. The adapter uses no alternate screen and includes only the
+selection and text-entry models needed by bootstrap.
 
 The Linux agent is built with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`. Deployment
 probes the remote platform, uploads to a unique temporary file, verifies SHA-256
