@@ -5,22 +5,25 @@
 class Pwnbridge < Formula
   desc "Make a remote Linux x86-64 pwn environment feel local on macOS"
   homepage "https://github.com/simonfalke-01/pwnbridge"
+  version "0.1.0"
   license "MIT"
-  head "https://github.com/simonfalke-01/pwnbridge.git", branch: "main"
 
-  depends_on "go" => :build
+  if Hardware::CPU.arm?
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.0/pwnbridge_0.1.0_darwin_arm64.tar.gz"
+    sha256 "6157e679e618711bd4b97c58697c84d9117825d7020dd599662354811b103f60"
+  else
+    url "https://github.com/simonfalke-01/pwnbridge/releases/download/v0.1.0/pwnbridge_0.1.0_darwin_amd64.tar.gz"
+    sha256 "e1beb95fc139f542a0395817768ba0920ea7ffc81fe1302412fa939a251f7e65"
+  end
+
   depends_on "mutagen-io/mutagen/mutagen"
 
   def install
-    ldflags = %W[
-      -s -w
-      -X github.com/simonfalke-01/pwnbridge/internal/version.Version=#{version}
-    ]
-    system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/pwnbridge"
-    system({ "CGO_ENABLED" => "0", "GOOS" => "linux", "GOARCH" => "amd64" },
-           "go", "build", "-trimpath", "-o", "pwnbridge-agent-linux-amd64", "./cmd/pwnbridge-agent")
+    bin.install "pwnbridge"
     (libexec/"pwnbridge").install "pwnbridge-agent-linux-amd64"
-    generate_completions_from_executable(bin/"pwnbridge", "completion")
+    bash_completion.install "completions/pwnbridge.bash" => "pwnbridge"
+    zsh_completion.install "completions/_pwnbridge"
+    fish_completion.install "completions/pwnbridge.fish"
   end
 
   test do
