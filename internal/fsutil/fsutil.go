@@ -373,7 +373,7 @@ func openPrivateAppendFileAt(directoryFD int, directory, name string) (*os.File,
 }
 
 func sameUnixFile(first, second *unix.Stat_t) bool {
-	return uint64(first.Dev) == uint64(second.Dev) && first.Ino == second.Ino
+	return first.Dev == second.Dev && first.Ino == second.Ino
 }
 
 func ReadJSONLimit(path string, maximum int64, value any) error {

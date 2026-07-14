@@ -669,6 +669,8 @@ func fileDevice(info os.FileInfo) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
+	// #nosec G115 -- dev_t is an opaque filesystem identity; converting its
+	// platform representation to uint64 preserves equality without arithmetic.
 	return uint64(stat.Dev), true
 }
 

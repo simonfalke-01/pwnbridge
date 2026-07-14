@@ -2,8 +2,8 @@
 
 ## Toolchain
 
-Pwnbridge's module language version is Go 1.25. CI runs the current supported
-Go 1.25.8 or newer on macOS and Ubuntu. The client is tested on
+Pwnbridge's module language version is Go 1.25. CI runs patched Go 1.25.12 and
+Go 1.26.5 on macOS and Ubuntu. The client is tested on
 Darwin ARM64; the remote agent is a static Linux amd64 cross-build.
 
 ```console

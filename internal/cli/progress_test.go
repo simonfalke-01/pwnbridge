@@ -26,6 +26,11 @@ func TestRecoveryProgressIsVisibleAndErasedOnTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer master.Close()
+	readDone := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(master)
+		readDone <- data
+	}()
 	progress := newLaunchProgress(slave)
 	display := &recoveryProgressDisplay{progress: progress}
 	display.Update(recoveryVerificationProgress{Index: 1, Total: 2, Bytes: 0, TotalBytes: 100})
@@ -38,7 +43,12 @@ func TestRecoveryProgressIsVisibleAndErasedOnTerminal(t *testing.T) {
 	if err := slave.Close(); err != nil {
 		t.Fatal(err)
 	}
-	data, _ := io.ReadAll(master)
+	var data []byte
+	select {
+	case data = <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out reading terminal recovery progress")
+	}
 	output := string(data)
 	for _, expected := range []string{"Verifying recovery 1/2", "(50%)", "(100%)", "\r\x1b[2K"} {
 		if !strings.Contains(output, expected) {

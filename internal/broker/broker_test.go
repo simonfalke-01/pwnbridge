@@ -21,7 +21,7 @@ import (
 )
 
 func TestBrokerAuthenticationAndPing(t *testing.T) {
-	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(t.TempDir(), "b.sock")}
+	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: shortBrokerSocket(t)}
 	b := New(record, provider.NewRegistry(t.TempDir()))
 	if err := b.Start(); err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func TestBrokerRunsAuthenticatedShellBarrier(t *testing.T) {
 }
 
 func TestBrokerCapsUnauthenticatedConnectionsAndReleasesSlots(t *testing.T) {
-	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(t.TempDir(), "b.sock")}
+	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: shortBrokerSocket(t)}
 	b := New(record, provider.NewRegistry(t.TempDir()))
 	b.handshakeTimeout = time.Second
 	if err := b.Start(); err != nil {
@@ -140,7 +140,7 @@ func TestBrokerCapsUnauthenticatedConnectionsAndReleasesSlots(t *testing.T) {
 }
 
 func TestBrokerHandshakeTimeoutAndAuthenticatedLongevity(t *testing.T) {
-	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(t.TempDir(), "b.sock")}
+	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: shortBrokerSocket(t)}
 	b := New(record, provider.NewRegistry(t.TempDir()))
 	b.handshakeTimeout = 40 * time.Millisecond
 	if err := b.Start(); err != nil {
@@ -202,7 +202,7 @@ func TestBrokerHandshakeTimeoutAndAuthenticatedLongevity(t *testing.T) {
 }
 
 func TestBrokerCloseClosesAcceptedConnections(t *testing.T) {
-	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(t.TempDir(), "b.sock")}
+	record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: shortBrokerSocket(t)}
 	b := New(record, provider.NewRegistry(t.TempDir()))
 	b.handshakeTimeout = time.Minute
 	if err := b.Start(); err != nil {
@@ -230,7 +230,7 @@ func TestBrokerCloseClosesAcceptedConnections(t *testing.T) {
 
 func TestBrokerCloseRacesWithAccept(t *testing.T) {
 	for iteration := range 25 {
-		record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: filepath.Join(t.TempDir(), "b.sock")}
+		record := SessionRecord{Schema: 1, OwnerPID: os.Getpid(), ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: shortBrokerSocket(t)}
 		b := New(record, provider.NewRegistry(t.TempDir()))
 		b.handshakeTimeout = time.Minute
 		if err := b.Start(); err != nil {
@@ -264,6 +264,16 @@ func TestBrokerCloseRacesWithAccept(t *testing.T) {
 			t.Fatalf("iteration %d retained %d active connection(s)", iteration, active)
 		}
 	}
+}
+
+func shortBrokerSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "pb-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "b.sock")
 }
 
 func waitForConnectionCount(t *testing.T, b *Broker, want int) {

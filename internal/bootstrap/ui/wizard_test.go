@@ -58,6 +58,7 @@ func TestChoiceHasVisibleSelectionWithoutColor(t *testing.T) {
 }
 
 func TestFinalizeChoicesAreVerticalAndRecipeBindingIsSkippedWhenUnnamed(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 	model := newFinalizeModel(func(string) error { return nil })
 	model.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 	model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
