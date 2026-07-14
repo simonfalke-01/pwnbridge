@@ -17,11 +17,13 @@ import (
 	"time"
 
 	"github.com/simonfalke-01/pwnbridge/internal/config"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
 	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 )
 
-var identifierPattern = regexp.MustCompile(`\bsync_[A-Za-z0-9]{32,}\b`)
+var identifierPattern = regexp.MustCompile(`\bsync_[A-Za-z0-9]{32,123}\b`)
 
 var BuiltinIgnores = []string{
 	".git", ".DS_Store", ".pwnbridge", ".venv", "venv", "__pycache__", "*.pyc", ".idea", ".vscode",
@@ -63,38 +65,63 @@ type CommandRunner struct {
 	DataDir string
 }
 
+const (
+	maxMutagenDaemonLogBytes     = 5 << 20
+	maxMutagenVersionOutputBytes = 64 << 10
+	maxMutagenCommandOutputBytes = 1 << 20
+	maxMutagenStateOutputBytes   = 16 << 20
+)
+
 func (r CommandRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 	dataDir, err := r.effectiveDataDir()
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, r.Path, args...)
+	cmd := subprocess.CommandContext(ctx, r.Path, args...)
 	cmd.Env = commandEnvironment(dataDir)
-	out, err := cmd.CombinedOutput()
+	result, err := subprocess.Capture(ctx, cmd, mutagenOutputLimit(args), subprocess.DiagnosticLimit)
 	if err != nil {
-		return out, fmt.Errorf("%s %s: %w: %s", r.Path, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+		if detail := result.Diagnostic(); detail != "" {
+			return result.Stdout, fmt.Errorf("%s %s: %w: %s", r.Path, strings.Join(args, " "), err, detail)
+		}
+		return result.Stdout, fmt.Errorf("%s %s: %w", r.Path, strings.Join(args, " "), err)
 	}
-	return out, nil
+	return result.Stdout, nil
+}
+
+func mutagenOutputLimit(args []string) int {
+	if len(args) == 1 && args[0] == "version" {
+		return maxMutagenVersionOutputBytes
+	}
+	if len(args) >= 2 && args[0] == "sync" && args[1] == "list" {
+		return maxMutagenStateOutputBytes
+	}
+	return maxMutagenCommandOutputBytes
 }
 
 func (r CommandRunner) StartDaemon(ctx context.Context) error {
-	dataDir, err := r.effectiveDataDir()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return err
+	if err := os.MkdirAll(r.DataDir, 0o700); err != nil {
+		return fmt.Errorf("create Mutagen data directory: %w", err)
+	}
+	if err := fsutil.ValidatePrivateDirectory(r.DataDir); err != nil {
+		return fmt.Errorf("validate Mutagen data directory: %w", err)
 	}
 	if _, err := r.Run(ctx, "daemon", "start"); err == nil {
 		return nil
 	}
-	logPath := filepath.Join(dataDir, "daemon.log")
-	if info, err := os.Stat(logPath); err == nil && info.Size() > 5<<20 {
-		_ = os.Rename(logPath, logPath+".previous")
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	dataDir, err := r.effectiveDataDir()
 	if err != nil {
 		return err
+	}
+	logFile, _, err := fsutil.OpenPrivateRotatingAppendFile(r.DataDir, "daemon.log", maxMutagenDaemonLogBytes)
+	if err != nil {
+		return fmt.Errorf("open isolated Mutagen daemon log: %w", err)
 	}
 	cmd := exec.Command(r.Path, "daemon", "run")
 	cmd.Env = commandEnvironment(dataDir)
@@ -102,12 +129,22 @@ func (r CommandRunner) StartDaemon(ctx context.Context) error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		logFile.Close()
-		return err
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, logFile.Close())
 	}
-	_ = cmd.Process.Release()
-	_ = logFile.Close()
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start isolated Mutagen daemon process: %w", errors.Join(err, logFile.Close()))
+	}
+	if err := logFile.Close(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("close isolated Mutagen daemon log: %w", err)
+	}
+	if err := cmd.Process.Release(); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("release isolated Mutagen daemon process: %w", err)
+	}
 	return nil
 }
 

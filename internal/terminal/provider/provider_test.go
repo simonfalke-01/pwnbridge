@@ -3,11 +3,16 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 )
 
 func TestTitleSanitization(t *testing.T) {
@@ -292,4 +297,119 @@ printf '{"provider":"custom:test","id":"handle-1"}\n'
 	if request.Version != 1 || request.Operation != "open" || len(request.Value.Command) != 2 || request.Value.Command[1] != "a b" {
 		t.Fatalf("bad custom provider request: %#v", request)
 	}
+}
+
+func TestCustomProviderBoundsInheritedOutputPipes(t *testing.T) {
+	script := `#!/bin/sh
+sleep 4 &
+printf '{"provider":"custom:test","id":"handle-1"}\n'
+`
+	installFakeProviderTool(t, "pwnbridge-terminal-test", script)
+	started := time.Now()
+	_, err := (Custom{Name: "test"}).Open(context.Background(), Spec{})
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("custom provider with inherited output pipe returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("inherited provider output pipe remained open for %v", elapsed)
+	}
+}
+
+func TestProviderResponseLimits(t *testing.T) {
+	t.Run("small open acknowledgement", func(t *testing.T) {
+		script := "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null\n"
+		installFakeProviderTool(t, "tmux", script)
+		t.Setenv("TMUX", "/tmp/tmux")
+		t.Setenv("TMUX_PANE", "%1")
+		_, err := (Tmux{}).Open(context.Background(), Spec{Cwd: "/tmp", Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "65536-byte limit") {
+			t.Fatalf("oversized open response = %v", err)
+		}
+	})
+
+	t.Run("tmux inspection overflow is not a closed pane", func(t *testing.T) {
+		script := "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null\n"
+		installFakeProviderTool(t, "tmux", script)
+		state, err := (Tmux{}).Inspect(context.Background(), Handle{ID: "%1"})
+		if state.Exists || err == nil || !strings.Contains(err.Error(), "65536-byte limit") {
+			t.Fatalf("oversized tmux inspection state=%#v error=%v", state, err)
+		}
+	})
+
+	t.Run("Zellij visibility inventory overflow", func(t *testing.T) {
+		script := `#!/bin/sh
+case "$*" in
+  *"new-pane"*) printf 'terminal_7\n' ;;
+  *"list-panes --json"*) dd if=/dev/zero bs=1048576 count=5 2>/dev/null ;;
+esac
+`
+		installFakeProviderTool(t, "zellij", script)
+		t.Setenv("ZELLIJ", "0")
+		_, err := (Zellij{}).Open(context.Background(), Spec{Cwd: "/tmp", RequireVisible: true, Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "4194304-byte limit") {
+			t.Fatalf("oversized Zellij visibility error = %v", err)
+		}
+	})
+
+	t.Run("terminal inventory maximum and overflow", func(t *testing.T) {
+		dir := t.TempDir()
+		responsePath := filepath.Join(dir, "response")
+		prefix := `[{"pane_id":42,"padding":"`
+		suffix := `"}]`
+		response := prefix + strings.Repeat("x", maxProviderInventory-len(prefix)-len(suffix)) + suffix
+		if err := os.WriteFile(responsePath, []byte(response), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := "#!/bin/sh\ncat \"$PWNBRIDGE_PROVIDER_RESPONSE\"\n"
+		installFakeProviderTool(t, "wezterm", script)
+		t.Setenv("PWNBRIDGE_PROVIDER_RESPONSE", responsePath)
+		state, err := (WezTerm{}).Inspect(context.Background(), Handle{ID: "42"})
+		if err != nil || !state.Exists {
+			t.Fatalf("maximum inventory state=%#v error=%v", state, err)
+		}
+		if err := os.WriteFile(responsePath, append([]byte(response), 'x'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (WezTerm{}).Inspect(context.Background(), Handle{ID: "42"}); err == nil || !strings.Contains(err.Error(), "4194304-byte limit") {
+			t.Fatalf("oversized inventory error = %v", err)
+		}
+	})
+
+	t.Run("custom response maximum and overflow", func(t *testing.T) {
+		dir := t.TempDir()
+		responsePath := filepath.Join(dir, "response")
+		prefix := `{"provider":"custom:test","id":"handle","aux":"`
+		suffix := `"}`
+		response := prefix + strings.Repeat("x", maxCustomProviderOutput-len(prefix)-len(suffix)) + suffix
+		if err := os.WriteFile(responsePath, []byte(response), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		script := "#!/bin/sh\ncat >/dev/null\ncat \"$PWNBRIDGE_PROVIDER_RESPONSE\"\n"
+		installFakeProviderTool(t, "pwnbridge-terminal-limit", script)
+		t.Setenv("PWNBRIDGE_PROVIDER_RESPONSE", responsePath)
+		handle, err := (Custom{Name: "limit"}).Open(context.Background(), Spec{})
+		if err != nil || handle.ID != "handle" || len(handle.Aux) == 0 {
+			t.Fatalf("maximum custom handle=%#v error=%v", handle, err)
+		}
+		if err := os.WriteFile(responsePath, append([]byte(response), 'x'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (Custom{Name: "limit"}).Open(context.Background(), Spec{}); err == nil || !strings.Contains(err.Error(), "1048576-byte limit") {
+			t.Fatalf("oversized custom error = %v", err)
+		}
+	})
+
+	t.Run("final diagnostic", func(t *testing.T) {
+		script := "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=1 >&2 2>/dev/null\nprintf 'final-provider-error\\n' >&2\nexit 9\n"
+		installFakeProviderTool(t, "tmux", script)
+		t.Setenv("TMUX", "/tmp/tmux")
+		t.Setenv("TMUX_PANE", "%1")
+		_, err := (Tmux{}).Open(context.Background(), Spec{Cwd: "/tmp", Command: []string{"true"}})
+		if err == nil || !strings.Contains(err.Error(), "[output truncated]") || !strings.HasSuffix(err.Error(), "final-provider-error") {
+			t.Fatalf("provider diagnostic = %q", err)
+		}
+		if len(err.Error()) > subprocess.DiagnosticLimit+1024 {
+			t.Fatalf("provider diagnostic length = %d", len(err.Error()))
+		}
+	})
 }

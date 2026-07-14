@@ -128,7 +128,7 @@ func Run(ctx context.Context, options Options) (Result, error) {
 			return Result{}, normalizeAbort(err)
 		}
 		if !accepted {
-			return Result{}, errors.New("Docker root-equivalent group risk was not accepted")
+			return Result{}, errors.New("docker root-equivalent group risk was not accepted")
 		}
 		options.AcceptDockerRisk = true
 	}

@@ -42,6 +42,7 @@ On the Mac:
 
 - macOS on ARM64 or AMD64
 - OpenSSH (`ssh` and `scp`)
+- the macOS/POSIX `diff` utility for conflict previews
 - Mosh client (only for explicit `shell_transport = "mosh"`)
 - Mutagen exactly 0.18.1
 - one supported terminal provider; Terminal.app is always the fallback
@@ -111,11 +112,21 @@ Host pwnbox
 Then register and prepare it:
 
 ```console
-pwnbridge host add x86 pwnbox
-pwnbridge host default x86
-pwnbridge host doctor x86
+pwnbridge host add x86 pwnbox --check
 pwnbridge host bootstrap x86
 ```
+
+Checked registration validates the global record, ordinary SSH, Linux amd64,
+home capacity and permissions, ptrace policy, bootstrap-plan feasibility, and
+required reverse forwarding before it saves anything. The first host becomes
+the machine default automatically. The check uses separate 20-second inventory
+and 15-second forwarding budgets and never deploys the agent, invokes sudo, or
+changes the remote. `--json` emits the complete/partial report for automation.
+Adding without `--check` remains a fast local-only operation.
+
+`host doctor` is the later read-only health check: unlike registration, it also
+reports whether every selected tool is installed and healthy. Bootstrap is the
+explicit mutation step and performs its own postflight verification.
 
 On a terminal, `host bootstrap` opens an inline wizard after a read-only host
 inventory. The default `pwn` recipe installs the complete build/debug set and
@@ -144,7 +155,7 @@ your existing SSH connection, verifies the hash on Linux, and atomically
 caches it under:
 
 ```text
-~/.local/share/pwnbridge/agents/3/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/4/<sha256>/pwnbridge-agent
 ```
 
 `host bootstrap` detects apt, dnf/yum, pacman, zypper, apk, XBPS, Portage, or
@@ -168,6 +179,7 @@ per-challenge config file is required:
 cd /path/to/challenge
 pwnbridge host use x86
 pwnbridge doctor
+pwnbridge support --local-only    # privacy-allowlisted issue report
 pwnbridge                         # managed interactive Bash
 pwnbridge run -- pwninit          # one command (explicit form)
 pb pwninit                        # one command (concise form)
@@ -175,6 +187,20 @@ pwnbridge run -- ./chall          # one command
 pwnbridge run -- python solve.py
 pwnbridge run --tty=always -- gdb ./chall
 ```
+
+Retire a host from any directory with a local, offline preview first:
+
+```console
+pwnbridge host remove x86 --dry-run
+pwnbridge host remove x86 --yes
+```
+
+Normal removal is blocked while the name is the default or is referenced by a
+project binding, retained remote workspace, synchronization/runtime state, or
+recovery data. Active sessions can never be overridden. `--force --yes` removes
+only the global host record and deliberately preserves every inactive reference;
+re-adding the same name restores management. No removal mode contacts or deletes
+anything on the remote host.
 
 Use `pwnbridge init` only when the project needs ignores, environment values,
 or container runtime settings. The nearest ancestor `.pwnbridge.toml` defines
@@ -255,20 +281,50 @@ Conflicts and endpoint errors block execution instead of choosing a winner:
 
 ```console
 pwnbridge sync conflicts
+pwnbridge sync diff -- solve.py
 pwnbridge sync resolve --prefer local -- solve.py
 # or
 pwnbridge sync resolve --prefer remote -- generated.txt
+pwnbridge sync recovery list
+pwnbridge sync recovery verify
+pwnbridge sync recovery restore RECOVERY_ID --to recovered/generated.txt
+pwnbridge sync recovery prune --keep-last 5 --dry-run
+pwnbridge sync recovery prune --keep-last 5 --yes
 ```
 
 The losing version is copied to an XDG recovery directory outside the
-synchronized tree before resolution. Root deletion, safety halts, permissions,
-disk errors, and disconnected endpoints also block execution. Pwnbridge never
-resets synchronization history automatically.
+synchronized tree before resolution. Remote losers travel through an
+acknowledged agent stream: the client validates, syncs, hashes, and catalogs
+the backup before permitting removal, and the agent re-hashes the source before
+deleting it. Recovery IDs and SHA-256 digests remain discoverable later;
+restoration verifies cataloged content, requires a new project-relative
+destination, and never overwrites existing content. Restore changes only the
+local workspace, so use `pwnbridge sync flush` when you want an explicit
+propagation check. Root deletion, safety halts, permissions, disk errors, and
+disconnected endpoints also block execution. Pwnbridge never resets
+synchronization history automatically.
+
+Run `pwnbridge sync recovery verify` periodically to read and hash every
+cataloged copy, or pass exact recovery IDs to check only selected entries.
+Verification is local and read-only; damaged or pre-digest legacy entries make
+the command return nonzero. Interactive human runs show delayed, path-free
+byte/item progress without an extra scan. `--json` stays a single quiet document
+and adds `checked`/`total` counters to the structured per-entry results. Ctrl-C
+prints completed checks with `complete=false` before retaining exit 130.
+
+Recovery storage is finite, so explicit pruning operates on complete
+conflict-resolution archives rather than individual entries. It always keeps at
+least the requested number of newest archives, requires either `--dry-run` or
+`--yes`, and reports logical bytes rather than promising exact allocated disk
+space. Pruning is local, offline, irreversible, and never changes either
+synchronized workspace. If cancellation interrupts physical cleanup after an
+archive is durably hidden, the next confirmed prune safely resumes that cleanup.
 
 `pwnbridge stop` performs a final barrier, terminates dependent panes, and
-pauses synchronization. `pwnbridge clean` removes Pwnbridge/Mutagen metadata
-but preserves both workspaces. Remote deletion requires the explicit
-`pwnbridge clean --remote --yes` form.
+pauses synchronization. `pwnbridge clean` terminates Mutagen metadata and
+preserves both workspaces; a small local lifecycle record remains so host
+retirement cannot forget the retained remote root. Remote deletion requires the
+explicit `pwnbridge clean --remote --yes` form.
 
 ## Container runtime
 
@@ -290,6 +346,10 @@ Pwnbridge creates one unprivileged, long-lived container per active session,
 adds only the ptrace capability/security adjustment needed by GDB, does not
 mount the engine socket, and removes the container during cleanup. Container
 mode materially reduces exposure but is not a complete server trust boundary.
+When an uncached image is needed, an interactive shell/run/pane streams native
+Docker or Podman pull progress immediately; redirected/non-terminal commands
+use quiet pull mode and keep stdout/stderr automation clean. Ctrl-C cancels and
+reaps the engine client, while management replies remain bounded.
 See [container-runtime.md](docs/container-runtime.md).
 
 ## Diagnostics and automation
@@ -298,6 +358,7 @@ Start troubleshooting with:
 
 ```console
 pwnbridge doctor
+pwnbridge support --local-only
 pwnbridge status
 pwnbridge sync status
 pwnbridge terminal providers
@@ -309,6 +370,23 @@ Commands with `--json` return a stable envelope:
 ```json
 {"schema":1,"data":{}}
 ```
+
+Both doctor forms keep completed checks when another probe fails or times out.
+Their JSON data includes stable `ok`, `complete`, and ordered `checks` fields;
+human output ends with the same complete/incomplete result. Project doctor
+uses 10-second local, 20-second read-only inventory, and 15-second temporary
+reverse-forwarding budgets. It does not upload an agent, invoke sudo, install
+software, or persist remote diagnostic files. A failed check or incomplete
+report returns nonzero after output; Ctrl-C emits accumulated checks and
+retains exit status 130.
+
+`pwnbridge support` prints a copy/pasteable report built from a positive
+privacy allowlist. It includes versions, safe effective behavior, capability
+availability, coarse sync/recovery state, and a read-only remote inventory, but
+never logs, paths, host names or destinations, IDs, config/environment values,
+commands, images, conflict names, tokens, raw errors, or command output. Use
+`--local-only` to skip SSH and `--json` for structured output. Nothing is
+uploaded or saved; review the report before sharing it.
 
 Exit status `4` means synchronization safety blocked execution, `130` means
 cancellation, and ordinary remote statuses are preserved. Other Pwnbridge

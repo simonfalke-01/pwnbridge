@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 	"github.com/simonfalke-01/pwnbridge/internal/transport"
 	"golang.org/x/term"
@@ -34,7 +35,13 @@ const (
 	PwndbgVersion   = "2026.02.18"
 	PwndbgURL       = "https://github.com/pwndbg/pwndbg/releases/download/" + PwndbgVersion + "/pwndbg_" + PwndbgVersion + "_x86_64-portable.tar.xz"
 	PwndbgSHA256    = "eeb93972d7910bf8233abf296b00577efb7137d94655502985566a328e5cecce"
+
+	maxBootstrapLogBytes        = 16 << 20
+	maxBootstrapStreamLineBytes = 1 << 20
 )
+
+const bootstrapLogTruncated = "\n=== bootstrap log truncated at 16 MiB ===\n"
+const bootstrapLineTruncated = "[bootstrap output line exceeded 1 MiB and was omitted]"
 
 type Options struct {
 	DryRun, NoSudo, WithPwndbg bool
@@ -158,15 +165,11 @@ func RunResult(ctx context.Context, client transport.Client, options Options) (R
 		if err := os.MkdirAll(filepath.Dir(options.LogPath), 0o700); err != nil {
 			return result, fmt.Errorf("create bootstrap log directory: %w", err)
 		}
-		file, openErr := os.OpenFile(options.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		file, size, openErr := fsutil.OpenPrivateAppendFile(options.LogPath, maxBootstrapLogBytes)
 		if openErr != nil {
 			return result, fmt.Errorf("open bootstrap log: %w", openErr)
 		}
-		if chmodErr := file.Chmod(0o600); chmodErr != nil {
-			_ = file.Close()
-			return result, fmt.Errorf("secure bootstrap log: %w", chmodErr)
-		}
-		log = file
+		log = &boundedLogWriter{target: file, remaining: maxBootstrapLogBytes - size}
 		_, _ = fmt.Fprintf(log, "\n=== bootstrap attempt %s recipe=%s ===\n", time.Now().UTC().Format(time.RFC3339), resolved.Recipe.Name)
 	}
 	defer log.Close()
@@ -330,15 +333,66 @@ type nopWriteCloser struct{ io.Writer }
 
 func (nopWriteCloser) Close() error { return nil }
 
+type boundedLogWriter struct {
+	target    io.WriteCloser
+	remaining int64
+	truncated bool
+}
+
+func (w *boundedLogWriter) Write(data []byte) (int, error) {
+	length := len(data)
+	if length == 0 || w.remaining <= 0 {
+		return length, nil
+	}
+	if int64(length) <= w.remaining {
+		n, err := w.target.Write(data)
+		w.remaining -= int64(n)
+		return n, err
+	}
+	allowed := int(w.remaining)
+	marker := []byte(bootstrapLogTruncated)
+	if !w.truncated && allowed > len(marker) {
+		allowed -= len(marker)
+		if err := writeAll(w.target, data[:allowed]); err != nil {
+			return 0, err
+		}
+		if err := writeAll(w.target, marker); err != nil {
+			return 0, err
+		}
+		w.truncated = true
+	} else if err := writeAll(w.target, data[:allowed]); err != nil {
+		return 0, err
+	}
+	w.remaining = 0
+	return length, nil
+}
+
+func (w *boundedLogWriter) Close() error { return w.target.Close() }
+
+func writeAll(target io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := target.Write(data)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
+}
+
 type progressWriter struct {
-	mu        sync.Mutex
-	target    io.Writer
-	pending   []string
-	completed []string
-	buffer    bytes.Buffer
-	quiet     bool
-	auth      bool
-	inline    bool
+	mu         sync.Mutex
+	target     io.Writer
+	pending    []string
+	completed  []string
+	buffer     bytes.Buffer
+	quiet      bool
+	auth       bool
+	inline     bool
+	discarding bool
 }
 
 func newProgress(steps []Step, target io.Writer, quiet bool) *progressWriter {
@@ -355,17 +409,41 @@ func newProgress(steps []Step, target io.Writer, quiet bool) *progressWriter {
 func (p *progressWriter) Write(data []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	_, _ = p.buffer.Write(data)
-	for {
-		line, err := p.buffer.ReadString('\n')
-		if err != nil {
-			if p.auth && line != "" {
-				_, _ = fmt.Fprint(p.target, sanitize(line))
-			} else {
-				p.buffer.WriteString(line)
+	length := len(data)
+	for len(data) > 0 {
+		if p.discarding {
+			newline := bytes.IndexByte(data, '\n')
+			if newline < 0 {
+				return length, nil
 			}
-			break
+			p.discarding = false
+			data = data[newline+1:]
+			continue
 		}
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			if p.auth {
+				_, _ = fmt.Fprint(p.target, sanitize(string(data)))
+				return length, nil
+			}
+			if p.buffer.Len()+len(data) > maxBootstrapStreamLineBytes {
+				p.buffer.Reset()
+				p.discarding = true
+				return length, nil
+			}
+			_, _ = p.buffer.Write(data)
+			return length, nil
+		}
+		segment := data[:newline+1]
+		if p.buffer.Len()+len(segment) > maxBootstrapStreamLineBytes {
+			p.buffer.Reset()
+			data = data[newline+1:]
+			continue
+		}
+		_, _ = p.buffer.Write(segment)
+		line := p.buffer.String()
+		p.buffer.Reset()
+		data = data[newline+1:]
 		clean := sanitize(line)
 		if strings.HasPrefix(strings.TrimSpace(clean), "{") {
 			var event protocol.BootstrapEvent
@@ -388,7 +466,7 @@ func (p *progressWriter) Write(data []byte) (int, error) {
 		}
 		p.handleEvent(fields)
 	}
-	return len(data), nil
+	return length, nil
 }
 func (p *progressWriter) handleEvent(fields []string) {
 	if len(fields) < 3 {
@@ -441,31 +519,55 @@ func (p *progressWriter) snapshot() ([]string, []string) {
 }
 
 type sanitizeWriter struct {
-	target  io.Writer
-	mu      sync.Mutex
-	pending bytes.Buffer
+	target     io.Writer
+	mu         sync.Mutex
+	pending    bytes.Buffer
+	discarding bool
 }
 
 func (w *sanitizeWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, _ = w.pending.Write(data)
-	scanner := bufio.NewScanner(&w.pending)
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if len(data) > 0 && data[len(data)-1] != '\n' && len(lines) > 0 {
-		tail := lines[len(lines)-1]
-		lines = lines[:len(lines)-1]
+	length := len(data)
+	for len(data) > 0 {
+		if w.discarding {
+			newline := bytes.IndexByte(data, '\n')
+			if newline < 0 {
+				return length, nil
+			}
+			w.discarding = false
+			data = data[newline+1:]
+			continue
+		}
+		newline := bytes.IndexByte(data, '\n')
+		if newline < 0 {
+			if w.pending.Len()+len(data) > maxBootstrapStreamLineBytes {
+				w.pending.Reset()
+				w.discarding = true
+				if _, err := fmt.Fprintln(w.target, bootstrapLineTruncated); err != nil {
+					return 0, err
+				}
+				return length, nil
+			}
+			_, _ = w.pending.Write(data)
+			return length, nil
+		}
+		segment := data[:newline]
+		if w.pending.Len()+len(segment) > maxBootstrapStreamLineBytes {
+			w.pending.Reset()
+			if _, err := fmt.Fprintln(w.target, bootstrapLineTruncated); err != nil {
+				return 0, err
+			}
+			data = data[newline+1:]
+			continue
+		}
+		_, _ = w.pending.Write(segment)
+		display := sanitize(strings.TrimSuffix(w.pending.String(), "\r"))
 		w.pending.Reset()
-		w.pending.WriteString(tail)
-	}
-	for _, line := range lines {
-		display := sanitize(line)
 		var event protocol.BootstrapEvent
 		if json.Unmarshal([]byte(strings.TrimSpace(display)), &event) == nil {
 			if event.Type != "output" {
+				data = data[newline+1:]
 				continue
 			}
 			display = sanitize(event.Output)
@@ -473,8 +575,9 @@ func (w *sanitizeWriter) Write(data []byte) (int, error) {
 		if _, err := fmt.Fprintln(w.target, display); err != nil {
 			return 0, err
 		}
+		data = data[newline+1:]
 	}
-	return len(data), nil
+	return length, nil
 }
 
 // sanitize removes C0 controls (except tabs/newlines) and CSI/OSC terminal
@@ -522,13 +625,12 @@ func sanitize(value string) string {
 }
 
 func PrintSanitizedLog(out io.Writer, path string) error {
-	file, err := os.Open(path)
+	data, err := fsutil.ReadPrivateFileLimit(path, maxBootstrapLogBytes)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 4096), 16<<20)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), maxBootstrapStreamLineBytes+1)
 	for scanner.Scan() {
 		if _, err := fmt.Fprintln(out, sanitize(scanner.Text())); err != nil {
 			return err

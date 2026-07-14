@@ -38,7 +38,10 @@ TOML
 cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" host add lima lima-pwn
 "$ROOT/bin/pwnbridge" host use lima
-test "$("$ROOT/bin/pwnbridge" run -- uname -m)" = x86_64
+test "$("$ROOT/bin/pwnbridge" run -- uname -m 2>"$TMP/runtime-stderr")" = x86_64
+if grep -E 'Pulling fs layer|Copying blob|Getting image source signatures' "$TMP/runtime-stderr"; then
+    exit 1
+fi
 "$ROOT/bin/pwnbridge" run -- sh -c 'printf container-artifact > from-container.txt'
 test "$(cat from-container.txt)" = container-artifact
 "$ROOT/bin/pwnbridge" clean --remote --yes

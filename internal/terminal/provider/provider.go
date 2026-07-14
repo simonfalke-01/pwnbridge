@@ -16,6 +16,7 @@ import (
 
 	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/identity"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
@@ -50,6 +51,31 @@ type Handle struct {
 }
 
 type State struct{ Exists, Running bool }
+
+const (
+	maxProviderCommandOutput = 64 << 10
+	maxProviderInventory     = 4 << 20
+	maxCustomProviderOutput  = 1 << 20
+)
+
+func providerCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return subprocess.CommandContext(ctx, name, args...)
+}
+
+func captureProviderCommand(ctx context.Context, cmd *exec.Cmd, limit int) ([]byte, error) {
+	result, err := subprocess.Capture(ctx, cmd, limit, subprocess.DiagnosticLimit)
+	if err != nil {
+		if detail := result.Diagnostic(); detail != "" {
+			return result.Stdout, fmt.Errorf("%w: %s", err, detail)
+		}
+		return result.Stdout, err
+	}
+	return result.Stdout, nil
+}
+
+func providerOutput(ctx context.Context, limit int, name string, args ...string) ([]byte, error) {
+	return captureProviderCommand(ctx, providerCommandContext(ctx, name, args...), limit)
+}
 
 type Provider interface {
 	Detect(context.Context) (Capabilities, int, error)
@@ -205,8 +231,8 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 		}
 		if focusID != "" {
 			focusArgs := append(append([]string{}, prefix...), "action", "focus-pane-id", focusID)
-			if output, focusErr := exec.CommandContext(ctx, "zellij", focusArgs...).CombinedOutput(); focusErr != nil {
-				return Handle{}, fmt.Errorf("zellij focus pane %s: %w: %s", focusID, focusErr, strings.TrimSpace(string(output)))
+			if _, focusErr := providerOutput(ctx, maxProviderCommandOutput, "zellij", focusArgs...); focusErr != nil {
+				return Handle{}, fmt.Errorf("zellij focus pane %s: %w", focusID, focusErr)
 			}
 		}
 	}
@@ -222,9 +248,9 @@ func zellijSessionPrefix() []string {
 
 func currentZellijTabID(ctx context.Context, prefix []string) (int, error) {
 	args := append(append([]string{}, prefix...), "action", "current-tab-info", "--json")
-	out, err := exec.CommandContext(ctx, "zellij", args...).CombinedOutput()
+	out, err := providerOutput(ctx, maxProviderCommandOutput, "zellij", args...)
 	if err != nil {
-		return 0, fmt.Errorf("query current Zellij tab: %w: %s", err, strings.TrimSpace(string(out)))
+		return 0, fmt.Errorf("query current Zellij tab: %w", err)
 	}
 	var tab struct {
 		ID int `json:"tab_id"`
@@ -242,7 +268,7 @@ func waitForZellijPane(ctx context.Context, prefix []string, handleID string) er
 	}
 	for attempt := 0; attempt < 20; attempt++ {
 		args := append(append([]string{}, prefix...), "action", "list-panes", "--json")
-		out, listErr := exec.CommandContext(ctx, "zellij", args...).Output()
+		out, listErr := providerOutput(ctx, maxProviderInventory, "zellij", args...)
 		if listErr == nil {
 			var panes []zellijPane
 			if decodeErr := json.Unmarshal(out, &panes); decodeErr != nil {
@@ -252,6 +278,13 @@ func waitForZellijPane(ctx context.Context, prefix []string, handleID string) er
 				if pane.ID == id && !pane.Plugin {
 					return nil
 				}
+			}
+		} else if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		} else {
+			var exitErr *exec.ExitError
+			if !errors.As(listErr, &exitErr) {
+				return fmt.Errorf("query Zellij panes: %w", listErr)
 			}
 		}
 		select {
@@ -264,7 +297,7 @@ func waitForZellijPane(ctx context.Context, prefix []string, handleID string) er
 }
 func (Zellij) Inspect(ctx context.Context, h Handle) (State, error) {
 	if h.Aux == "tab" {
-		out, err := exec.CommandContext(ctx, "zellij", "action", "list-tabs", "--json").Output()
+		out, err := providerOutput(ctx, maxProviderInventory, "zellij", "action", "list-tabs", "--json")
 		if err != nil {
 			return State{}, err
 		}
@@ -283,7 +316,7 @@ func (Zellij) Inspect(ctx context.Context, h Handle) (State, error) {
 		}
 		return State{}, nil
 	}
-	out, err := exec.CommandContext(ctx, "zellij", "action", "list-panes", "--json").Output()
+	out, err := providerOutput(ctx, maxProviderInventory, "zellij", "action", "list-panes", "--json")
 	if err != nil {
 		return State{}, err
 	}
@@ -304,7 +337,7 @@ func (Zellij) Inspect(ctx context.Context, h Handle) (State, error) {
 }
 func (Zellij) Focus(ctx context.Context, h Handle) error {
 	if h.Aux == "tab" {
-		out, err := exec.CommandContext(ctx, "zellij", "action", "list-tabs", "--json").Output()
+		out, err := providerOutput(ctx, maxProviderInventory, "zellij", "action", "list-tabs", "--json")
 		if err != nil {
 			return err
 		}
@@ -318,18 +351,18 @@ func (Zellij) Focus(ctx context.Context, h Handle) error {
 		}
 		for _, tab := range tabs {
 			if tab.ID == id {
-				return exec.CommandContext(ctx, "zellij", "action", "go-to-tab", strconv.Itoa(tab.Position+1)).Run()
+				return providerCommandContext(ctx, "zellij", "action", "go-to-tab", strconv.Itoa(tab.Position+1)).Run()
 			}
 		}
 		return fmt.Errorf("Zellij tab %s no longer exists", h.ID)
 	}
-	return exec.CommandContext(ctx, "zellij", "action", "focus-pane-id", h.ID).Run()
+	return providerCommandContext(ctx, "zellij", "action", "focus-pane-id", h.ID).Run()
 }
 func (Zellij) Close(ctx context.Context, h Handle) error {
 	if h.Aux == "tab" {
-		return ignoreMissing(exec.CommandContext(ctx, "zellij", "action", "close-tab", "--tab-id", strings.TrimPrefix(h.ID, "tab_")).Run())
+		return ignoreMissing(providerCommandContext(ctx, "zellij", "action", "close-tab", "--tab-id", strings.TrimPrefix(h.ID, "tab_")).Run())
 	}
-	return ignoreMissing(exec.CommandContext(ctx, "zellij", "action", "close-pane", "--pane-id", h.ID).Run())
+	return ignoreMissing(providerCommandContext(ctx, "zellij", "action", "close-pane", "--pane-id", h.ID).Run())
 }
 
 type Tmux struct{}
@@ -365,14 +398,21 @@ func (Tmux) Open(ctx context.Context, spec Spec) (Handle, error) {
 	return runOpen(ctx, "tmux", args, "tmux")
 }
 func (Tmux) Inspect(ctx context.Context, h Handle) (State, error) {
-	out, err := exec.CommandContext(ctx, "tmux", "display-message", "-p", "-t", h.ID, "#{pane_dead}").Output()
-	return State{Exists: err == nil, Running: err == nil && strings.TrimSpace(string(out)) != "1"}, nil
+	out, err := providerOutput(ctx, maxProviderCommandOutput, "tmux", "display-message", "-p", "-t", h.ID, "#{pane_dead}")
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return State{}, nil
+		}
+		return State{}, err
+	}
+	return State{Exists: true, Running: strings.TrimSpace(string(out)) != "1"}, nil
 }
 func (Tmux) Focus(ctx context.Context, h Handle) error {
-	return exec.CommandContext(ctx, "tmux", "select-pane", "-t", h.ID).Run()
+	return providerCommandContext(ctx, "tmux", "select-pane", "-t", h.ID).Run()
 }
 func (Tmux) Close(ctx context.Context, h Handle) error {
-	return ignoreMissing(exec.CommandContext(ctx, "tmux", "kill-pane", "-t", h.ID).Run())
+	return ignoreMissing(providerCommandContext(ctx, "tmux", "kill-pane", "-t", h.ID).Run())
 }
 
 type WezTerm struct{}
@@ -408,7 +448,7 @@ func (WezTerm) Open(ctx context.Context, spec Spec) (Handle, error) {
 	return runOpen(ctx, "wezterm", args, "wezterm")
 }
 func (WezTerm) Inspect(ctx context.Context, h Handle) (State, error) {
-	out, err := exec.CommandContext(ctx, "wezterm", "cli", "list", "--format", "json").Output()
+	out, err := providerOutput(ctx, maxProviderInventory, "wezterm", "cli", "list", "--format", "json")
 	if err != nil {
 		return State{}, err
 	}
@@ -426,10 +466,10 @@ func (WezTerm) Inspect(ctx context.Context, h Handle) (State, error) {
 	return State{}, nil
 }
 func (WezTerm) Focus(ctx context.Context, h Handle) error {
-	return exec.CommandContext(ctx, "wezterm", "cli", "activate-pane", "--pane-id", h.ID).Run()
+	return providerCommandContext(ctx, "wezterm", "cli", "activate-pane", "--pane-id", h.ID).Run()
 }
 func (WezTerm) Close(ctx context.Context, h Handle) error {
-	return ignoreMissing(exec.CommandContext(ctx, "wezterm", "cli", "kill-pane", "--pane-id", h.ID).Run())
+	return ignoreMissing(providerCommandContext(ctx, "wezterm", "cli", "kill-pane", "--pane-id", h.ID).Run())
 }
 
 type Kitty struct{}
@@ -469,7 +509,7 @@ func (Kitty) Open(ctx context.Context, spec Spec) (Handle, error) {
 	return runOpen(ctx, "kitty", args, "kitty")
 }
 func (Kitty) Inspect(ctx context.Context, h Handle) (State, error) {
-	out, err := exec.CommandContext(ctx, "kitty", "@", "ls").Output()
+	out, err := providerOutput(ctx, maxProviderInventory, "kitty", "@", "ls")
 	if err != nil {
 		return State{}, err
 	}
@@ -495,10 +535,10 @@ func (Kitty) Inspect(ctx context.Context, h Handle) (State, error) {
 	return State{}, nil
 }
 func (Kitty) Focus(ctx context.Context, h Handle) error {
-	return exec.CommandContext(ctx, "kitty", "@", "focus-window", "--match", "id:"+h.ID).Run()
+	return providerCommandContext(ctx, "kitty", "@", "focus-window", "--match", "id:"+h.ID).Run()
 }
 func (Kitty) Close(ctx context.Context, h Handle) error {
-	return ignoreMissing(exec.CommandContext(ctx, "kitty", "@", "close-window", "--match", "id:"+h.ID).Run())
+	return ignoreMissing(providerCommandContext(ctx, "kitty", "@", "close-window", "--match", "id:"+h.ID).Run())
 }
 
 type AppWindow struct{ Name, Application, RuntimeDir string }
@@ -527,9 +567,9 @@ func (a AppWindow) Open(ctx context.Context, spec Spec) (Handle, error) {
 	if err := fsutil.AtomicWrite(path, []byte(content), 0o700); err != nil {
 		return Handle{}, err
 	}
-	if out, err := exec.CommandContext(ctx, "open", "-na", a.Application, path).CombinedOutput(); err != nil {
+	if _, err := providerOutput(ctx, maxProviderCommandOutput, "open", "-na", a.Application, path); err != nil {
 		_ = os.Remove(path)
-		return Handle{}, fmt.Errorf("open %s: %w: %s", a.Application, err, strings.TrimSpace(string(out)))
+		return Handle{}, fmt.Errorf("open %s: %w", a.Application, err)
 	}
 	return Handle{Provider: a.Name, ID: id, Aux: path}, nil
 }
@@ -560,11 +600,11 @@ func (c Custom) Detect(_ context.Context) (Capabilities, int, error) {
 func (c Custom) call(ctx context.Context, operation string, value any, response any) error {
 	payload := map[string]any{"version": version.ProviderProtocol, "operation": operation, "value": value}
 	data, _ := json.Marshal(payload)
-	cmd := exec.CommandContext(ctx, c.executable())
+	cmd := providerCommandContext(ctx, c.executable())
 	cmd.Stdin = bytes.NewReader(data)
-	out, err := cmd.CombinedOutput()
+	out, err := captureProviderCommand(ctx, cmd, maxCustomProviderOutput)
 	if err != nil {
-		return fmt.Errorf("custom provider: %w: %s", err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("custom provider: %w", err)
 	}
 	if response != nil {
 		return json.Unmarshal(out, response)
@@ -585,9 +625,9 @@ func (c Custom) Focus(ctx context.Context, h Handle) error { return c.call(ctx, 
 func (c Custom) Close(ctx context.Context, h Handle) error { return c.call(ctx, "close", h, nil) }
 
 func runOpen(ctx context.Context, executable string, args []string, provider string) (Handle, error) {
-	out, err := exec.CommandContext(ctx, executable, args...).CombinedOutput()
+	out, err := providerOutput(ctx, maxProviderCommandOutput, executable, args...)
 	if err != nil {
-		return Handle{}, fmt.Errorf("%s open: %w: %s", provider, err, strings.TrimSpace(string(out)))
+		return Handle{}, fmt.Errorf("%s open: %w", provider, err)
 	}
 	id := strings.Fields(string(out))
 	value := "unknown"

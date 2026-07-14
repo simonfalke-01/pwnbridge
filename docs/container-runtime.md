@@ -42,6 +42,25 @@ network = "bridge"
 executable is missing. Valid networking is passed as one validated engine
 argument; choose `none` for offline challenges when possible.
 
+## Image acquisition
+
+Pwnbridge first asks the engine for the image's immutable SHA-256 ID. When the
+configured tag or digest is not present, the first container-backed shell,
+command, or debugger pane pulls it before container creation.
+
+If the remote agent's stderr is a terminal, Docker/Podman stdout and stderr are
+streamed directly so native layer progress appears immediately without an
+in-memory copy. If stderr is redirected or non-terminal, Pwnbridge passes the
+engine's documented `--quiet` option and emits nothing on success; a failure
+retains only its final bounded diagnostic. This keeps scripts clean without
+hiding interactive first-run work. Ctrl-C, SIGTERM, and SIGHUP cancel and reap
+the engine client before the requested command can start.
+
+Image inspection, detached creation, status, and removal replies are limited to
+64 KiB because their successful contracts are a boolean, immutable image ID,
+container ID/name, or empty acknowledgement. Excess structured output is
+drained and rejected instead of decoded partially.
+
 ## Lifecycle
 
 Each active Pwnbridge session creates one named container:

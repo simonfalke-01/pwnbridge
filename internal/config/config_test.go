@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,12 +42,101 @@ func TestStrictUnknownKey(t *testing.T) {
 	if err := os.MkdirAll(p.Config, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(p.Config, "config.toml"), []byte("schema=1\nunknown=true\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(p.Config, "config.toml"), []byte("schema=1\nunknown=true\nanother=false\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Load(root, p)
 	if err == nil {
 		t.Fatal("expected strict decode error")
+	}
+	var strict *toml.StrictMissingError
+	if !errors.As(err, &strict) {
+		t.Fatalf("strict error type was not preserved: %T: %v", err, err)
+	}
+	if detail := err.Error(); !strings.Contains(detail, "config.toml:2:1") ||
+		!strings.Contains(detail, `unknown configuration key "unknown"`) ||
+		!strings.Contains(detail, "(and 1 more unknown key(s))") {
+		t.Fatalf("strict error lacks path, position, or key: %v", err)
+	}
+}
+
+func TestConfigDecodeErrorIncludesPathPositionAndKey(t *testing.T) {
+	root := t.TempDir()
+	p := testPaths(root)
+	if err := os.MkdirAll(p.Config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(p.Config, "config.toml")
+	if err := os.WriteFile(path, []byte("schema = 2\n[sync]\nengine = []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(p)
+	if err == nil {
+		t.Fatal("invalid typed configuration was accepted")
+	}
+	var decode *toml.DecodeError
+	if !errors.As(err, &decode) {
+		t.Fatalf("decode error type was not preserved: %T: %v", err, err)
+	}
+	line, column := decode.Position()
+	if line != 3 || column < 1 {
+		t.Fatalf("decode position = %d:%d, want line 3", line, column)
+	}
+	detail := err.Error()
+	if !strings.Contains(detail, path+":3:") || !strings.Contains(detail, `"sync.engine"`) {
+		t.Fatalf("decode error lacks path, position, or key: %v", err)
+	}
+}
+
+func TestConfigRejectsPathologicalValueNesting(t *testing.T) {
+	root := t.TempDir()
+	p := testPaths(root)
+	if err := os.MkdirAll(p.Config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(p.Config, "config.toml")
+	const depth = 100_000
+	for _, test := range []struct {
+		name, value string
+	}{
+		{name: "array", value: strings.Repeat("[", depth) + strings.Repeat("]", depth)},
+		{name: "inline-table", value: strings.Repeat("{k=", depth) + "1" + strings.Repeat("}", depth)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			data := []byte("schema = 2\nunknown = " + test.value + "\n")
+			if len(data) >= maxConfigBytes {
+				t.Fatalf("regression input is %d bytes, outside parser boundary", len(data))
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadGlobal(p)
+			if err == nil {
+				t.Fatal("pathologically nested configuration was accepted")
+			}
+			var decode *toml.DecodeError
+			if !errors.As(err, &decode) {
+				t.Fatalf("nesting error type was not preserved: %T: %v", err, err)
+			}
+			if detail := err.Error(); !strings.Contains(detail, path+":2:") || !strings.Contains(detail, "nested more than the maximum") {
+				t.Fatalf("nesting error lacks bounded parser detail: %v", err)
+			}
+		})
+	}
+}
+
+func TestConfigRejectsOversizedFile(t *testing.T) {
+	root := t.TempDir()
+	p := testPaths(root)
+	if err := os.MkdirAll(p.Config, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := "schema=1\n#" + strings.Repeat("x", (1<<20)+1) + "\n"
+	if err := os.WriteFile(filepath.Join(p.Config, "config.toml"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGlobal(p); err == nil {
+		t.Fatal("oversized global configuration was accepted")
 	}
 }
 
@@ -273,4 +363,44 @@ func FuzzStrictProjectTOML(f *testing.F) {
 		project := Defaults().Project
 		_ = applyProject(&project, layer)
 	})
+}
+
+func BenchmarkStrictProjectDecode(b *testing.B) {
+	data := []byte(`schema = 1
+target = "linux/amd64"
+
+[workspace]
+root = "."
+ignore = [".git", "build", "core.*"]
+
+[environment]
+profile = "pwn"
+
+[environment.set]
+PWNLIB_NOTERM = "1"
+LC_ALL = "C.UTF-8"
+
+[shell]
+command = "bash"
+source_user_rc = true
+
+[runtime]
+kind = "container"
+
+[runtime.container]
+engine = "auto"
+image = "example.invalid/pwn:latest"
+workdir = "/work"
+network = "bridge"
+`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(data)))
+	for b.Loop() {
+		var layer projectLayer
+		decoder := toml.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&layer); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

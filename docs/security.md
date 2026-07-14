@@ -18,6 +18,7 @@ Trusted:
 Potentially hostile:
 
 - challenge binaries and scripts;
+- automatically discovered project configuration before it is validated;
 - stdout/stderr, filenames, pane titles, and manifests from the remote runtime;
 - the contents of the synchronized project;
 - same-container processes;
@@ -26,6 +27,13 @@ Potentially hostile:
 Direct-host mode executes as the configured remote Unix account. A challenge
 there can access everything that account can access. Use a dedicated,
 unprivileged pwn account without valuable credentials.
+
+Global and nearest-ancestor project TOML is read through a 1 MiB ceiling,
+decoded into strict typed layers, and rejected on unknown fields. Parser depth
+is bounded at 10,000 nested arrays/inline tables, so a hostile cloned project
+cannot turn discovery into unbounded recursion. User-facing decode errors show
+only the path, position, key, and parser message—not the offending value or
+surrounding configuration text.
 
 Container mode adds a process/filesystem boundary but is not a complete server
 trust boundary. Rootless Podman is preferable where available. Kernel bugs,
@@ -75,6 +83,36 @@ systems. Broker credentials are omitted from the command environment and kept
 in a mode-0600 per-session file, but tokens are not presented as isolation from
 a compromised remote Unix account. The local-command invariant limits what a
 forged valid broker request can cause on macOS.
+
+The isolated local Mutagen fallback log is opened relative to an owner-private
+data-directory descriptor. Pwnbridge refuses a linked directory, a final
+symbolic link, FIFO/device/socket/directory entries, a different owner, and any
+group/other permission before handing the descriptor to Mutagen. Non-blocking
+and no-follow opens make hostile special files fail promptly. Logs larger than
+5 MiB at fallback startup are descriptor-relatively renamed to
+`daemon.log.previous`; source identity is checked before and after the rename.
+This is startup rotation, not a hard runtime size cap: the released daemon owns
+its output descriptor and can continue writing until its next fallback start.
+
+Doctor does not upload or execute the agent and uses no sudo/package operation.
+Its remote inventory is the same bounded read-only script used by bootstrap
+planning; reverse-forwarding diagnosis creates only a temporary private control
+master and ephemeral loopback listener. Local, inventory, and forwarding work
+has independent cancellation budgets. Tiny SSH protocols retain at most 64 KiB
+for basic/forwarding output and 1 MiB for agent-probe JSON while draining excess.
+All rendered check details/remediation are valid UTF-8, single-line, escape/C0/
+format-control stripped, and capped before identical human/JSON reporting.
+
+`host add --check` uses the same read-only inventory and temporary forwarding
+boundary before persisting a machine-global candidate. It does not use SCP,
+Mutagen, the agent, sudo, package commands, or remote file creation. Missing
+installable tools are evaluated through the typed bootstrap plan, while unsafe
+platform/resource/ptrace/forwarding or blocked-plan results prevent the atomic
+config write. Existing names require `--replace`; a failed checked replacement
+leaves the old record durable. Ordinary add remains explicitly local-only. The
+network check never holds the global config lock; the final commit reloads and
+validates current state under that owner-private advisory lock before the
+fsync/rename write.
 
 ## SSH posture
 
@@ -166,7 +204,21 @@ Pwnbridge treats every local and remote file as potentially valuable:
 - Mutagen runs in `two-way-safe` mode;
 - execution requires flush plus a complete health validation;
 - conflicts have no automatic winner;
+- conflict previews use descriptor-relative no-follow traversal, cap each
+  endpoint at 1 MiB, and never render binary or terminal-control-bearing bytes;
 - resolution backs up the losing endpoint outside the sync root;
+- new recovery copies are durably cataloged before loser deletion, remain
+  listable in escaped human or structured JSON output, and restore only to an
+  explicit non-existing local target;
+- deterministic SHA-256 identities bind cataloged content and metadata;
+  explicit verification checks stored copies proactively, and restore verifies
+  both its source and newly copied destination;
+- explicit recovery pruning retains at least one newest whole resolution
+  archive, requires dry-run or confirmation, and durably hides an archive before
+  descriptor-rooted removal; it never prunes automatically or edits a manifest;
+- local backup, restore, recursive loser removal, remote backup streaming, and
+  remote loser removal operate relative to held filesystem roots so concurrent
+  symlink replacement cannot escape the workspace or recovery directory;
 - root deletion and replacement block execution;
 - an unhealthy/safety-halted session is never reset automatically;
 - `clean` preserves both workspaces;
@@ -174,6 +226,59 @@ Pwnbridge treats every local and remote file as potentially valuable:
 
 The project deliberately does not import `.gitignore`: cores, dumps, libc,
 loaders, and generated binaries commonly matter during exploitation.
+
+Recovery digests detect accidental or one-sided modification but are not an
+authenticated backup format: the same local account can modify both catalog
+and data. Rooted operations also permit access to mount points already present
+inside a workspace, matching Go's documented `os.Root` boundary. Remote loser
+deletion requires a durable client acknowledgement and a second full source
+digest. There remains a narrow interval between the second digest/identity
+check and descriptor-rooted removal in which a malicious same-account process
+can replace content inside the remote workspace; remote workspaces therefore
+remain outside the trust boundary. Replacement cannot redirect removal beyond
+the held workspace root.
+
+Recovery verification is strictly read-only and never treats a newly computed
+digest as historical evidence. Entries created before digest recording remain
+`unverified` and make a requested full check incomplete. Verification reads all
+selected bytes under the workspace lock, so it can be expensive, but remains
+cancelable and does not contact the remote host or synchronization daemon.
+Interactive progress contains only an entry index/count and clamped percentage,
+not IDs or original paths; recorded totals are display estimates and never
+influence the digest decision. Cancellation emits only fully completed entry
+results and retains exit 130.
+
+Pruning is intentionally archive-granular and irreversible. A same-root atomic
+rename plus recovery-root sync occurs before deletion, so interruption cannot
+expose a partially removed catalog archive. Cleanup checks cancellation between
+entries, refuses filesystem/mount crossings, and never follows stored symbolic
+links. Exact randomized tombstone grammar allows a later confirmed prune to
+finish space reclamation; unrelated hidden directories are ignored. Logical
+byte totals are informational and do not claim allocated blocks. The trusted
+local account can still replace objects inside the recovery root, but held
+descriptors prevent that replacement from redirecting deletion outside it.
+
+Non-interactive SSH management replies are retained at protocol-specific caps:
+64 KiB for forwarding/SCP diagnostics, 1 MiB for ordinary setup commands, and
+2 MiB for agent management JSON. The larger agent bound admits a maximum 1 MiB
+conflict snapshot after JSON base64 expansion. Excess is drained and rejected;
+interactive PTY data and recovery archive streams remain deliberately streamed
+without these collection caps.
+
+Local and remote-agent tool capture is bounded separately by documented shape:
+64 KiB for runtime/pane/version/disk acknowledgements, 1 MiB for custom terminal
+provider JSON and Mutagen management, 4 MiB for full terminal pane inventories,
+and 16 MiB for conflict-bearing Mutagen state. Structured stdout overflow is an
+error; stderr retains a marked 64 KiB tail so an attacker cannot hide the final
+failure behind progress noise. Collectors drain discarded bytes and retain
+context and inherited-descriptor bounds.
+
+An interactive Docker/Podman image pull is deliberately streamed rather than
+captured: it can be arbitrarily long but has no growing Pwnbridge buffer. The
+stream exists only on a terminal and is never parsed, persisted, or included in
+support output. Non-terminal pulls use official quiet mode plus bounded failure
+capture. Temporary signal interception cancels the engine client and is stopped
+before the agent executes the requested shell/command/pane.
 
 ## Dotfile and package posture
 
@@ -192,6 +297,27 @@ Pwnbridge never edits `.bashrc`, `.zshrc`, or GDB configuration. Managed Bash
 uses a per-session rcfile and optionally sources the user's `.bashrc` at
 runtime.
 
+## Host retirement
+
+Host deletion is local and fail-closed. Preview and confirmation read only
+owner-private, size-bounded JSON records without following final symlinks;
+catalog filenames, identity hashes, project/remote paths, schemas, record counts,
+and live leases are validated. Human paths are ASCII-quoted. A default host,
+project binding, retained workspace, recovery root, or active sync/runtime state
+blocks normal removal. Unattributed legacy recovery also blocks rather than
+being guessed.
+
+`--force --yes` may intentionally remove a global record while preserving known
+inactive references, analogous to leaving explicitly accepted dangling state.
+It deletes none of those files and no remote data, so re-adding the same name is
+the recovery path. A live or unidentifiable session is non-overridable. Preview
+is advisory; confirmation repeats inventory while holding the serialized global
+configuration transaction immediately before its durable write.
+Confirmed removal also owns a per-host lifecycle lease. New bindings and session
+startup take the same lease and revalidate the durable host record, closing the
+window in which an already-loaded explicit `--host` command could otherwise
+create state after removal.
+
 ## Known limits
 
 - A malicious remote user can act with that user's full permissions and can
@@ -209,7 +335,12 @@ runtime.
 
 ## Reporting
 
-When reporting a security issue, include `pwnbridge version --json`, macOS and
-remote distro versions, runtime/provider type, and a redacted reproduction. Do
-not include broker tokens, private SSH configuration, challenge flags, or
-private host addresses.
+Start with `pwnbridge support --local-only` (or add `--json`) and a separately
+written, redacted reproduction. The report is built from a positive allowlist
+and excludes paths/content, host names and
+addresses, workspace/machine/session/runtime IDs, configuration/environment
+names and values, commands/images/conflict paths, logs, tokens, raw output, and
+raw errors. The report is not uploaded or saved, and output should still be
+reviewed before sharing. Add the default read-only remote inventory
+only when contacting the configured host is appropriate. Never include broker
+tokens, private SSH configuration, challenge flags, or private host addresses.

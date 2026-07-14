@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	bootstraprecipe "github.com/simonfalke-01/pwnbridge/internal/bootstrap/recipe"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
@@ -35,6 +38,42 @@ func TestPwnPresetRetainsHistoricalAPTPackages(t *testing.T) {
 		if !got[want] {
 			t.Errorf("default pwn preset lost apt package %q", want)
 		}
+	}
+}
+
+func TestInspectBoundsHostileRemoteOutput(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=2 2>/dev/null\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Inspect(context.Background(), transport.Client{SSH: ssh, Destination: "fake"})
+	if err == nil || !strings.Contains(err.Error(), "exceeded 1048576-byte limit") {
+		t.Fatalf("hostile inventory output returned %v", err)
+	}
+}
+
+type inventoryCapture struct {
+	script string
+	limit  int
+}
+
+func (c *inventoryCapture) RawBounded(_ context.Context, script string, limit int) ([]byte, error) {
+	c.script, c.limit = script, limit
+	return []byte("__PB_HOST__lab\n__PB_OS__Linux\n__PB_ARCH__x86_64\n"), nil
+}
+
+func TestInspectDisablesPythonBytecodeWrites(t *testing.T) {
+	client := &inventoryCapture{}
+	if _, err := Inspect(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+	if client.limit != maxInventoryOutputBytes {
+		t.Fatalf("inventory limit = %d", client.limit)
+	}
+	if !strings.Contains(client.script, `"$p" -B -c`) {
+		t.Fatal("inventory Python metadata probe may write bytecode")
 	}
 }
 
@@ -145,6 +184,149 @@ func TestSanitizeHostileTerminalControls(t *testing.T) {
 	if got != "safebadtext" {
 		t.Fatalf("sanitize = %q", got)
 	}
+}
+
+func TestPrintSanitizedLogRejectsFIFOWithoutBlocking(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bootstrap.log")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- PrintSanitizedLog(io.Discard, path) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("FIFO bootstrap log was accepted")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("opening a FIFO bootstrap log blocked")
+	}
+}
+
+func TestPrintSanitizedLogRequiresPrivateBoundedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bootstrap.log")
+	if err := os.WriteFile(path, []byte("safe\x1b[2Jline\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := PrintSanitizedLog(&output, path); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "safeline\n" {
+		t.Fatalf("sanitized log = %q", output.String())
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrintSanitizedLog(io.Discard, path); err == nil {
+		t.Fatal("group-readable bootstrap log was accepted")
+	}
+	link := filepath.Join(dir, "link.log")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := PrintSanitizedLog(io.Discard, link); err == nil {
+		t.Fatal("bootstrap log symbolic link was followed")
+	}
+}
+
+func TestRunResultRejectsUnsafeLogBeforeSSH(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bootstrap.log")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	value, _ := BuiltinRecipe("minimal")
+	inventory := Inventory{
+		OS: "linux", Architecture: "amd64", Distro: "ubuntu", PackageManager: ManagerAPT,
+		HomeWritable: true, Root: true, Tools: map[string]bool{},
+	}
+	started := time.Now()
+	_, err := RunResult(context.Background(), transport.Client{SSH: filepath.Join(dir, "must-not-run")}, Options{
+		Yes: true, Recipe: value, Inventory: &inventory, LogPath: path,
+		Output: io.Discard, ErrorOutput: io.Discard,
+	})
+	if err == nil || !strings.Contains(err.Error(), "open bootstrap log") {
+		t.Fatalf("unsafe bootstrap log returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("unsafe bootstrap log blocked for %v", elapsed)
+	}
+}
+
+func TestBootstrapStreamWritersBoundAndRecoverFromOverlongLines(t *testing.T) {
+	oversized := []byte(strings.Repeat("x", maxBootstrapStreamLineBytes+1))
+	var progressOutput bytes.Buffer
+	tracker := newProgress([]Step{{ID: "one"}}, &progressOutput, true)
+	if n, err := tracker.Write(oversized); err != nil || n != len(oversized) {
+		t.Fatalf("progress overlong write = %d, %v", n, err)
+	}
+	if tracker.buffer.Len() != 0 || !tracker.discarding {
+		t.Fatalf("progress retained overlong line: bytes=%d discarding=%t", tracker.buffer.Len(), tracker.discarding)
+	}
+	event, _ := json.Marshal(protocol.BootstrapEvent{Type: "done", StepID: "one", Description: "First"})
+	if _, err := tracker.Write(append(append([]byte{'\n'}, event...), '\n')); err != nil {
+		t.Fatal(err)
+	}
+	completed, pending := tracker.snapshot()
+	if strings.Join(completed, ",") != "one" || len(pending) != 0 {
+		t.Fatalf("progress did not recover: completed=%v pending=%v", completed, pending)
+	}
+
+	var sanitized bytes.Buffer
+	writer := &sanitizeWriter{target: &sanitized}
+	if n, err := writer.Write(oversized); err != nil || n != len(oversized) {
+		t.Fatalf("sanitizer overlong write = %d, %v", n, err)
+	}
+	if writer.pending.Len() != 0 || !writer.discarding {
+		t.Fatalf("sanitizer retained overlong line: bytes=%d discarding=%t", writer.pending.Len(), writer.discarding)
+	}
+	if _, err := writer.Write([]byte("\nsafe\x1b[2Jline\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := sanitized.String(); got != bootstrapLineTruncated+"\nsafeline\n" {
+		t.Fatalf("sanitizer recovery = %q", got)
+	}
+}
+
+func TestBoundedLogWriterCapsAndMarksOutput(t *testing.T) {
+	var output bytes.Buffer
+	writer := &boundedLogWriter{target: nopWriteCloser{&output}, remaining: 128}
+	data := []byte(strings.Repeat("x", 256))
+	if n, err := writer.Write(data); err != nil || n != len(data) {
+		t.Fatalf("bounded log write = %d, %v", n, err)
+	}
+	if output.Len() != 128 || !strings.Contains(output.String(), "bootstrap log truncated") {
+		t.Fatalf("bounded log size/content = %d, %q", output.Len(), output.String())
+	}
+	if n, err := writer.Write(data); err != nil || n != len(data) || output.Len() != 128 {
+		t.Fatalf("discarded log write = %d, %v; size=%d", n, err, output.Len())
+	}
+}
+
+func BenchmarkBootstrapStreamWriters(b *testing.B) {
+	event, _ := json.Marshal(protocol.BootstrapEvent{Type: "start", StepID: "one", Description: "Install component"})
+	event = append(event, '\n')
+	b.Run("progress", func(b *testing.B) {
+		tracker := newProgress([]Step{{ID: "one"}}, io.Discard, true)
+		for b.Loop() {
+			if _, err := tracker.Write(event); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("sanitized-verbose", func(b *testing.B) {
+		writer := &sanitizeWriter{target: io.Discard}
+		outputEvent, _ := json.Marshal(protocol.BootstrapEvent{Type: "output", StepID: "one", Output: "download progress"})
+		outputEvent = append(outputEvent, '\n')
+		b.ResetTimer()
+		for b.Loop() {
+			if _, err := writer.Write(outputEvent); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 func TestStructuredEventsTrackResumeState(t *testing.T) {

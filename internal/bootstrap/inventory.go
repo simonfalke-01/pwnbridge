@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/simonfalke-01/pwnbridge/internal/transport"
 )
+
+const maxInventoryOutputBytes = 1 << 20
 
 type Inventory struct {
 	Host             string          `json:"host"`
@@ -32,7 +32,9 @@ type Inventory struct {
 
 // Inspect uses only ordinary read-only commands. In particular it does not
 // invoke sudo, create probe files, deploy the agent, or refresh repositories.
-func Inspect(ctx context.Context, client transport.Client) (Inventory, error) {
+func Inspect(ctx context.Context, client interface {
+	RawBounded(context.Context, string, int) ([]byte, error)
+}) (Inventory, error) {
 	script := `set -f
 printf '__PB_HOST__%s\n' "$(hostname 2>/dev/null || uname -n)"
 printf '__PB_OS__%s\n' "$(uname -s 2>/dev/null)"
@@ -66,13 +68,13 @@ for tool in bash cc cmake file readelf git curl xz gdb gdbserver gdb-multiarch p
 done
 id -nG 2>/dev/null | tr ' ' '\n' | grep -qx docker && printf '__PB_TOOL__docker-group=1\n' || printf '__PB_TOOL__docker-group=0\n'
 p="$HOME/.local/share/pwnbridge/envs/pwn-v1/bin/python"
-if test -x "$p"; then "$p" -c 'import importlib.metadata as m; print("__PB_PWNTOOLS__" + m.version("pwntools"))' 2>/dev/null || true; fi
+if test -x "$p"; then "$p" -B -c 'import importlib.metadata as m; print("__PB_PWNTOOLS__" + m.version("pwntools"))' 2>/dev/null || true; fi
 if test -x "$HOME/.local/share/pwnbridge/pwndbg/current/bin/pwndbg"; then printf '__PB_PWNDBG__` + PwndbgVersion + `\n'; fi`
 	// Reading Yama policy is optional and deliberately kept out of the shell
 	// expression above so systems without /proc remain supported.
 	script += `
 if test -r /proc/sys/kernel/yama/ptrace_scope; then printf '__PB_PTRACE__%s\n' "$(cat /proc/sys/kernel/yama/ptrace_scope)"; fi`
-	output, err := client.Raw(ctx, script)
+	output, err := client.RawBounded(ctx, script, maxInventoryOutputBytes)
 	if err != nil {
 		return Inventory{}, fmt.Errorf("inspect remote host: %w", err)
 	}

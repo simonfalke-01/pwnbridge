@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,11 @@ import (
 )
 
 const MaxFrame = 1 << 20
+
+// MaxConflictPreviewBytes bounds each endpoint payload returned for a conflict
+// preview. Remote responses use newline JSON rather than framed protocol data,
+// but sharing this limit keeps both endpoint implementations identical.
+const MaxConflictPreviewBytes = 1 << 20
 
 type Message struct {
 	Protocol  int             `json:"protocol"`
@@ -99,6 +105,38 @@ type CleanupRequest struct {
 	Runtime    RuntimeSpec `json:"runtime"`
 }
 
+type SnapshotRequest struct {
+	Root string `json:"root"`
+	Path string `json:"path"`
+}
+
+type FileSnapshot struct {
+	Kind       string `json:"kind"`
+	Size       int64  `json:"size,omitempty"`
+	Mode       uint32 `json:"mode,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	Content    []byte `json:"content,omitempty"`
+	Omitted    bool   `json:"omitted,omitempty"`
+	LinkTarget string `json:"link_target,omitempty"`
+}
+
+type RecoveryRequest struct {
+	Root string `json:"root"`
+	Path string `json:"path"`
+}
+
+type RecoveryAck struct {
+	Commit bool   `json:"commit"`
+	SHA256 string `json:"sha256"`
+}
+
+type RecoveryResult struct {
+	SHA256  string `json:"sha256"`
+	Size    int64  `json:"size"`
+	Items   int64  `json:"items"`
+	Removed bool   `json:"removed"`
+}
+
 // BootstrapRequest is the UI-independent execution contract. Arguments and
 // environment values are discrete fields; agents never evaluate user-provided
 // command templates.
@@ -166,10 +204,7 @@ func Decode(r io.Reader, value any) error {
 	if _, err := io.ReadFull(r, data); err != nil {
 		return err
 	}
-	if !json.Valid(data) {
-		return errors.New("invalid JSON frame")
-	}
-	if err := json.Unmarshal(data, value); err != nil {
+	if err := decodeStrictJSON(data, value); err != nil {
 		return err
 	}
 	return nil
@@ -188,6 +223,22 @@ func ParsePayload[T any](msg Message) (T, error) {
 	if len(msg.Payload) == 0 {
 		return value, nil
 	}
-	err := json.Unmarshal(msg.Payload, &value)
+	err := decodeStrictJSON(msg.Payload, &value)
 	return value, err
+}
+
+func decodeStrictJSON(data []byte, value any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return fmt.Errorf("trailing JSON data: %w", err)
+		}
+		return errors.New("trailing JSON value")
+	}
+	return nil
 }

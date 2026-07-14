@@ -3,8 +3,10 @@ package ui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -89,6 +91,106 @@ func TestChoiceRespondsToNarrowResizeWithoutAlternateScreen(t *testing.T) {
 	}
 }
 
+func TestChoiceHandlesUnicodeGraphemesAtNarrowWidths(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	model := newChoiceModel("選択 👩‍👩‍👧‍👦", "Combining e\u0301 and flag 🏳️‍🌈 remain measurable.", "1 / 4  Recipe", []choiceOption{
+		{Label: "界界界界界 joined 👩‍💻", Value: "wide"},
+		{Label: "plain", Value: "plain"},
+	}, "wide")
+	model.Update(tea.WindowSizeMsg{Width: 24, Height: 12})
+	view := model.View()
+	if view.AltScreen {
+		t.Fatal("Unicode choice requested the alternate screen")
+	}
+	if !strings.Contains(view.Content, "› ") {
+		t.Fatalf("Unicode choice lost its visible selection:\n%s", view.Content)
+	}
+	for _, line := range strings.Split(view.Content, "\n") {
+		if width := ansi.StringWidth(line); width > 24 {
+			t.Errorf("line width %d exceeds terminal width 24: %q", width, line)
+		}
+	}
+}
+
+func TestInteractiveChoiceRunsWithPipeInput(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var output bytes.Buffer
+	session := newPromptSession(context.Background(), strings.NewReader("\r"), &output, false)
+	selected, err := session.choose("Choose 界", "emoji 👩‍👩‍👧‍👦", "1 / 1", []choiceOption{{Label: "pwn 🧰", Value: "pwn"}}, "pwn")
+	if err != nil || selected != "pwn" {
+		t.Fatalf("pipe-input choice = %q, %v\n%s", selected, err, output.String())
+	}
+	if strings.Contains(output.String(), "\x1b[?1049") {
+		t.Fatal("pipe-input choice entered the alternate screen")
+	}
+}
+
+type quitOnInitModel struct{ *choiceModel }
+
+func (m quitOnInitModel) Init() tea.Cmd { return tea.Quit }
+
+func TestInteractiveChoiceRestoresWithInputDisabled(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	model := quitOnInitModel{newChoiceModel("Choose 界", "emoji 👩‍👩‍👧‍👦", "1 / 1", []choiceOption{{Label: "pwn", Value: "pwn"}}, "pwn")}
+	var output bytes.Buffer
+	final, err := tea.NewProgram(model, tea.WithInput(nil), tea.WithOutput(&output)).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final == nil || strings.Contains(output.String(), "\x1b[?1049") {
+		t.Fatalf("disabled-input program final=%T output=%q", final, output.String())
+	}
+}
+
+func FuzzChoiceModelUnicode(f *testing.F) {
+	f.Setenv("NO_COLOR", "1")
+	for _, seed := range []string{"plain", "界界界", "e\u0301", "👩‍👩‍👧‍👦", "🏳️‍🌈 pwn", "العربية"} {
+		f.Add(seed, uint8(24))
+	}
+	f.Fuzz(func(t *testing.T, label string, rawWidth uint8) {
+		if len(label) > 4096 {
+			t.Skip()
+		}
+		label = strings.Map(func(r rune) rune {
+			if r < 32 || r == 127 {
+				return ' '
+			}
+			return r
+		}, label)
+		width := 20 + int(rawWidth%69)
+		result := make(chan string, 1)
+		go func() { result <- validateChoiceView(label, width) }()
+		timer := time.NewTimer(250 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case problem := <-result:
+			if problem != "" {
+				t.Fatal(problem)
+			}
+		case <-timer.C:
+			t.Fatalf("choice rendering exceeded 250ms for width %d and label %q", width, label)
+		}
+	})
+}
+
+func validateChoiceView(label string, width int) string {
+	model := newChoiceModel("Choose a recipe", "Unicode bootstrap option", "1 / 4  Recipe", []choiceOption{{Label: label, Value: "value"}}, "value")
+	model.Update(tea.WindowSizeMsg{Width: width, Height: 12})
+	view := model.View()
+	if view.AltScreen {
+		return "choice requested the alternate screen"
+	}
+	if !strings.Contains(view.Content, "› ") || strings.Contains(view.Content, "\x1b[") {
+		return fmt.Sprintf("plain view lost selection or added styling: %q", view.Content)
+	}
+	for _, line := range strings.Split(view.Content, "\n") {
+		if lineWidth := ansi.StringWidth(line); lineWidth > width {
+			return fmt.Sprintf("line width %d exceeds terminal width %d: %q", lineWidth, width, line)
+		}
+	}
+	return ""
+}
+
 func TestSpaceTogglesPwndbgComponent(t *testing.T) {
 	model := newConfigureModel([]toggleOption{{
 		Label: "Pwndbg",
@@ -124,4 +226,25 @@ func healthyInventory() bootstrap.Inventory {
 		}
 	}
 	return bootstrap.Inventory{Host: "lab", OS: "linux", Architecture: "amd64", Distro: "debian", PackageManager: bootstrap.ManagerAPT, Libc: "glibc 2.41", DiskAvailableKiB: 2 * 1024 * 1024, InodesAvailable: 2000, HomeWritable: true, SudoAvailable: true, Tools: tools, PwntoolsVersion: bootstrap.PwntoolsVersion}
+}
+
+var benchmarkChoiceView tea.View
+
+func BenchmarkChoiceModelViewUnicode(b *testing.B) {
+	b.Setenv("NO_COLOR", "1")
+	model := newChoiceModel(
+		"Choose a bootstrap recipe 界",
+		"Combining e\u0301 · family 👩‍👩‍👧‍👦 · flag 🏳️‍🌈",
+		"1 / 4  Recipe",
+		[]choiceOption{
+			{Label: "pwn — complete default tool set 🧰", Value: "pwn"},
+			{Label: "minimal — mandatory capabilities only", Value: "minimal"},
+		},
+		"pwn",
+	)
+	model.Update(tea.WindowSizeMsg{Width: 48, Height: 20})
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkChoiceView = model.View()
+	}
 }

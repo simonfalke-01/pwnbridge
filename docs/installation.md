@@ -5,6 +5,8 @@
 The supported complete topology is macOS ARM64/AMD64 as client and
 Linux amd64 as execution host. The client is a native Darwin
 binary; the remote agent is a static Linux amd64 binary deployed over SSH.
+The supported macOS base supplies POSIX `diff`, which Pwnbridge uses only for
+read-only unified conflict previews.
 
 ## Release archive
 
@@ -133,19 +135,33 @@ For Zsh, ensure the chosen directory is in `fpath` before `compinit`.
 Registration is machine-local:
 
 ```console
-pwnbridge host add x86 pwnbox
-pwnbridge host doctor x86
+pwnbridge host add x86 pwnbox --check
 pwnbridge host bootstrap x86 --dry-run
 pwnbridge host bootstrap x86
+pwnbridge host doctor x86
 ```
 
 The host name is a small local identifier (ASCII letters, digits, `.`, `_`, and
-`-`); the destination remains your normal OpenSSH alias. Doctor verifies the
+`-`); the destination remains your normal OpenSSH alias. Checked registration
+uses bounded read-only inventory and temporary forwarding probes and saves only
+when the built-in `pwn` plan can prepare the host. It validates platform,
+capacity, ptrace policy, and scope-required forwarding; it does not require
+installable bootstrap tools to exist yet. The first host becomes the default.
+Existing names require `--replace`, and a failed checked replacement preserves
+the old record. Add without `--check` when a strictly offline local registration
+is intentional.
+
+Doctor verifies the
 remote platform, toolchain, disk/inodes, ptrace, pinned pwntools environment,
 reverse forwarding, configured container engine, and explicit Mosh
 prerequisites when selected. Mosh and forwarding diagnostics do not prevent the
 default predictive inline shell, plain SSH, one-shot runs, or
 `terminal.scope = "remote"` operation.
+Doctor uses bounded read-only inventory plus a temporary forwarding probe; it
+does not deploy the agent or install anything. Its partial report identifies a
+timed-out/unavailable collector separately from a completed missing-capability
+check. `host bootstrap` is the explicit remote mutation step; checked add and
+doctor never deploy, copy, install, invoke sudo, or write remotely.
 
 The default TTY command is an inline wizard. It inventories the host, lets you
 choose `pwn`, `minimal`, a saved recipe, or custom components, then reviews the

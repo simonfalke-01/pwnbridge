@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +19,13 @@ import (
 )
 
 var unsafeSlug = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
+
+const maxWorkspaceStateBytes = 1 << 20
+const maxMachineIDBytes = 64
+const maxCatalogEntries = 4096
+
+const workspaceStateSchema = 2
+const bindingSchema = 2
 
 type Workspace struct {
 	ID           string `json:"id"`
@@ -36,6 +44,9 @@ type State struct {
 	Schema            int       `json:"schema"`
 	WorkspaceID       string    `json:"workspace_id"`
 	HostID            string    `json:"host_id"`
+	LocalRoot         string    `json:"local_root,omitempty"`
+	RemotePath        string    `json:"remote_path,omitempty"`
+	RemoteRetained    bool      `json:"remote_retained,omitempty"`
 	MutagenIdentifier string    `json:"mutagen_identifier,omitempty"`
 	SyncFingerprint   string    `json:"sync_fingerprint,omitempty"`
 	RuntimeID         string    `json:"runtime_id,omitempty"`
@@ -43,8 +54,24 @@ type State struct {
 }
 
 type Binding struct {
-	Schema int    `json:"schema"`
-	HostID string `json:"host_id"`
+	Schema    int    `json:"schema"`
+	HostID    string `json:"host_id"`
+	LocalRoot string `json:"local_root,omitempty"`
+}
+
+type StoredState struct {
+	State
+	Legacy bool `json:"legacy,omitempty"`
+}
+
+type StoredBinding struct {
+	Binding
+	Legacy bool `json:"legacy,omitempty"`
+}
+
+type RecoveryRoot struct {
+	WorkspaceID string `json:"workspace_id"`
+	Path        string `json:"path"`
 }
 
 type Manager struct{ Paths paths.Paths }
@@ -56,7 +83,7 @@ func (m Manager) MachineID() (string, error) {
 		return "", err
 	}
 	defer lock.Close()
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadPrivateFileLimit(path, maxMachineIDBytes)
 	if err == nil {
 		id := strings.TrimSpace(string(data))
 		if !isHexID(id, 32) {
@@ -129,21 +156,104 @@ func workspaceSlug(base string) string {
 
 func (m Manager) LoadState(ws Workspace) (State, error) {
 	var state State
-	if err := fsutil.ReadJSON(ws.StatePath, &state); err != nil {
+	if err := fsutil.ReadPrivateJSONLimit(ws.StatePath, maxWorkspaceStateBytes, &state); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return State{Schema: 1, WorkspaceID: ws.ID, HostID: ws.HostID}, nil
+			return State{Schema: workspaceStateSchema, WorkspaceID: ws.ID, HostID: ws.HostID, LocalRoot: ws.LocalRoot, RemotePath: ws.RemotePath}, nil
 		}
 		return State{}, err
 	}
-	if state.Schema != 1 || state.WorkspaceID != ws.ID || state.HostID != ws.HostID {
-		return State{}, fmt.Errorf("workspace state identity mismatch in %s", ws.StatePath)
+	if err := validateState(ws, state); err != nil {
+		return State{}, fmt.Errorf("invalid workspace state in %s: %w", ws.StatePath, err)
+	}
+	if state.Schema == 1 {
+		state.LocalRoot, state.RemotePath, state.RemoteRetained = ws.LocalRoot, ws.RemotePath, true
 	}
 	return state, nil
 }
 
 func (m Manager) SaveState(ws Workspace, state State) error {
-	state.Schema, state.WorkspaceID, state.HostID, state.UpdatedAt = 1, ws.ID, ws.HostID, time.Now().UTC()
+	state.Schema, state.WorkspaceID, state.HostID = workspaceStateSchema, ws.ID, ws.HostID
+	state.LocalRoot, state.RemotePath, state.UpdatedAt = ws.LocalRoot, ws.RemotePath, time.Now().UTC()
+	if err := validateState(ws, state); err != nil {
+		return err
+	}
 	return fsutil.WriteJSON(ws.StatePath, state)
+}
+
+func validateState(ws Workspace, state State) error {
+	if state.WorkspaceID != ws.ID || state.HostID != ws.HostID {
+		return errors.New("identity mismatch")
+	}
+	switch state.Schema {
+	case 1:
+		if state.LocalRoot != "" || state.RemotePath != "" || state.RemoteRetained {
+			return errors.New("schema-one state contains schema-two fields")
+		}
+	case workspaceStateSchema:
+		if state.LocalRoot != ws.LocalRoot {
+			return errors.New("workspace path mismatch")
+		}
+	default:
+		return errors.New("unsupported workspace state schema")
+	}
+	return validateStateValues(state)
+}
+
+func validateStateValues(state State) error {
+	if !isHexID(state.WorkspaceID, 16) || !validStateName(state.HostID, 64) {
+		return errors.New("invalid workspace identity")
+	}
+	if state.Schema == workspaceStateSchema {
+		if !validStoredLocalRoot(state.LocalRoot) || !validStoredRemotePath(state.RemotePath) {
+			return errors.New("invalid workspace paths")
+		}
+	}
+	if !validMutagenIdentifier(state.MutagenIdentifier) {
+		return errors.New("invalid Mutagen identifier")
+	}
+	if state.SyncFingerprint != "" && !isHexID(state.SyncFingerprint, 64) {
+		return errors.New("invalid synchronization fingerprint")
+	}
+	if state.RuntimeID != "" && !validStateName(state.RuntimeID, 128) {
+		return errors.New("invalid runtime identifier")
+	}
+	return nil
+}
+
+func validStoredLocalRoot(value string) bool {
+	return value != "" && len(value) <= 4096 && filepath.IsAbs(value) && filepath.Clean(value) == value && strings.IndexByte(value, 0) < 0
+}
+
+func validStoredRemotePath(value string) bool {
+	return value != "" && len(value) <= 4096 && strings.IndexByte(value, 0) < 0 && !strings.ContainsAny(value, "\r\n") &&
+		(strings.HasPrefix(value, "~/") || filepath.IsAbs(value))
+}
+
+func validMutagenIdentifier(value string) bool {
+	if value == "" {
+		return true
+	}
+	if len(value) < len("sync_")+32 || len(value) > 128 || !strings.HasPrefix(value, "sync_") {
+		return false
+	}
+	for _, r := range strings.TrimPrefix(value, "sync_") {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validStateName(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || strings.HasPrefix(value, "-") {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func (m Manager) Binding(localRoot string) (string, error) {
@@ -154,26 +264,168 @@ func (m Manager) Binding(localRoot string) (string, error) {
 	h := sha256.Sum256([]byte(root))
 	path := filepath.Join(m.Paths.State, "bindings", hex.EncodeToString(h[:])[:16]+".json")
 	var binding Binding
-	if err := fsutil.ReadJSON(path, &binding); err != nil {
+	if err := fsutil.ReadPrivateJSONLimit(path, maxWorkspaceStateBytes, &binding); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
 	}
-	if binding.Schema != 1 {
-		return "", fmt.Errorf("unsupported binding schema")
+	if err := validateBinding(binding, root, strings.TrimSuffix(filepath.Base(path), ".json")); err != nil {
+		return "", err
 	}
 	return binding.HostID, nil
 }
 
 func (m Manager) SetBinding(localRoot, hostID string) error {
+	if hostID != "" && !validStateName(hostID, 64) {
+		return errors.New("invalid binding host ID")
+	}
 	root, err := canonicalLocalRoot(localRoot)
 	if err != nil {
 		return err
 	}
 	h := sha256.Sum256([]byte(root))
 	path := filepath.Join(m.Paths.State, "bindings", hex.EncodeToString(h[:])[:16]+".json")
-	return fsutil.WriteJSON(path, Binding{Schema: 1, HostID: hostID})
+	return fsutil.WriteJSON(path, Binding{Schema: bindingSchema, HostID: hostID, LocalRoot: root})
+}
+
+func validateBinding(binding Binding, root, fileID string) error {
+	if binding.HostID != "" && !validStateName(binding.HostID, 64) {
+		return errors.New("invalid binding host ID")
+	}
+	if !isHexID(fileID, 16) {
+		return errors.New("invalid binding filename")
+	}
+	switch binding.Schema {
+	case 1:
+		if binding.LocalRoot != "" {
+			return errors.New("schema-one binding contains schema-two fields")
+		}
+	case bindingSchema:
+		if !validStoredLocalRoot(binding.LocalRoot) {
+			return errors.New("invalid binding local root")
+		}
+		h := sha256.Sum256([]byte(binding.LocalRoot))
+		if hex.EncodeToString(h[:])[:16] != fileID || root != "" && binding.LocalRoot != root {
+			return errors.New("binding project identity mismatch")
+		}
+	default:
+		return errors.New("unsupported binding schema")
+	}
+	return nil
+}
+
+func (m Manager) ListStates() ([]StoredState, error) {
+	root := filepath.Join(m.Paths.State, "workspaces")
+	entries, err := fsutil.ReadPrivateDirectoryLimit(root, maxCatalogEntries)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	states := make([]StoredState, 0, len(entries))
+	for _, entry := range entries {
+		id := entry.Name()
+		if !isHexID(id, 16) || entry.Type()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("invalid workspace catalog entry %s", filepath.Join(root, id))
+		}
+		directory := filepath.Join(root, id)
+		if err := fsutil.ValidatePrivateDirectory(directory); err != nil {
+			return nil, err
+		}
+		var state State
+		path := filepath.Join(directory, "state.json")
+		if err := fsutil.ReadPrivateJSONLimit(path, maxWorkspaceStateBytes, &state); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		legacy := state.Schema == 1
+		if state.WorkspaceID != id {
+			return nil, fmt.Errorf("workspace catalog identity mismatch in %s", path)
+		}
+		if legacy {
+			if state.LocalRoot != "" || state.RemotePath != "" || state.RemoteRetained {
+				return nil, fmt.Errorf("invalid schema-one workspace state in %s", path)
+			}
+			state.RemoteRetained = true
+		} else if state.Schema != workspaceStateSchema {
+			return nil, fmt.Errorf("unsupported workspace state schema in %s", path)
+		}
+		if err := validateStateValues(state); err != nil {
+			return nil, fmt.Errorf("invalid workspace state in %s: %w", path, err)
+		}
+		states = append(states, StoredState{State: state, Legacy: legacy})
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].WorkspaceID < states[j].WorkspaceID })
+	return states, nil
+}
+
+func (m Manager) ListBindings() ([]StoredBinding, error) {
+	root := filepath.Join(m.Paths.State, "bindings")
+	entries, err := fsutil.ReadPrivateDirectoryLimit(root, maxCatalogEntries)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	bindings := make([]StoredBinding, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".pwnbridge-tmp-") {
+			continue
+		}
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(name) != ".json" {
+			return nil, fmt.Errorf("invalid binding catalog entry %s", filepath.Join(root, name))
+		}
+		id := strings.TrimSuffix(name, ".json")
+		var binding Binding
+		path := filepath.Join(root, name)
+		if err := fsutil.ReadPrivateJSONLimit(path, maxWorkspaceStateBytes, &binding); err != nil {
+			return nil, err
+		}
+		if err := validateBinding(binding, "", id); err != nil {
+			return nil, fmt.Errorf("invalid binding in %s: %w", path, err)
+		}
+		bindings = append(bindings, StoredBinding{Binding: binding, Legacy: binding.Schema == 1})
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		if bindings[i].LocalRoot == bindings[j].LocalRoot {
+			return bindings[i].HostID < bindings[j].HostID
+		}
+		return bindings[i].LocalRoot < bindings[j].LocalRoot
+	})
+	return bindings, nil
+}
+
+func (m Manager) ListRecoveryRoots() ([]RecoveryRoot, error) {
+	root := filepath.Join(m.Paths.Data, "recovery")
+	entries, err := fsutil.ReadPrivateDirectoryLimit(root, maxCatalogEntries)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	recoveryRoots := make([]RecoveryRoot, 0, len(entries))
+	for _, entry := range entries {
+		id := entry.Name()
+		path := filepath.Join(root, id)
+		if !isHexID(id, 16) || entry.Type()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("invalid recovery catalog entry %s", path)
+		}
+		nonEmpty, err := fsutil.PrivateDirectoryNonEmpty(path)
+		if err != nil {
+			return nil, err
+		}
+		if nonEmpty {
+			recoveryRoots = append(recoveryRoots, RecoveryRoot{WorkspaceID: id, Path: path})
+		}
+	}
+	sort.Slice(recoveryRoots, func(i, j int) bool { return recoveryRoots[i].WorkspaceID < recoveryRoots[j].WorkspaceID })
+	return recoveryRoots, nil
 }
 
 func canonicalLocalRoot(localRoot string) (string, error) {

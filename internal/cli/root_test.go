@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -14,7 +15,9 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/config"
 	"github.com/simonfalke-01/pwnbridge/internal/paths"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/recovery"
 	"github.com/simonfalke-01/pwnbridge/internal/shell"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/syncer"
 	"github.com/simonfalke-01/pwnbridge/internal/transport"
 	"github.com/simonfalke-01/pwnbridge/internal/workspace"
@@ -307,7 +310,7 @@ func TestVersionJSON(t *testing.T) {
 	if err := execute(t, app, "version", "--json"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), `"protocol": 3`) || !strings.Contains(output.String(), `"config_schema": 2`) {
+	if !strings.Contains(output.String(), `"protocol": 4`) || !strings.Contains(output.String(), `"config_schema": 2`) {
 		t.Fatalf("output: %s", output)
 	}
 }
@@ -411,29 +414,219 @@ func TestJSONEnvelopeAndExitCodes(t *testing.T) {
 	}
 }
 
-func TestRecoveryCopyDoesNotFollowSymlinks(t *testing.T) {
+func TestValidateConflictArgumentsRequiresExactSafeUniquePaths(t *testing.T) {
+	raw := map[string]any{"conflicts": []any{
+		map[string]any{"path": "solve.py"},
+		map[string]any{"path": "directory/space name.txt"},
+	}}
+	paths, err := validateConflictArguments(raw, []string{"solve.py", "directory/space name.txt"})
+	if err != nil || strings.Join(paths, "|") != "solve.py|directory/space name.txt" {
+		t.Fatalf("validated paths = %v, %v", paths, err)
+	}
+	for name, arguments := range map[string][]string{
+		"escape":       {"../solve.py"},
+		"absolute":     {filepath.Join(string(filepath.Separator), "solve.py")},
+		"not-conflict": {"other.py"},
+		"duplicate":    {"solve.py", "./solve.py"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := validateConflictArguments(raw, arguments); err == nil {
+				t.Fatalf("arguments %v were accepted", arguments)
+			}
+		})
+	}
+	if _, err := validateConflictArguments(map[string]any{"status": "broken"}, []string{"solve.py"}); err == nil || !strings.Contains(err.Error(), "no resolvable") {
+		t.Fatalf("missing conflicts returned %v", err)
+	}
+}
+
+func TestWriteConflictDiffShowsSafeUnifiedLocalToRemotePreview(t *testing.T) {
+	local := protocol.FileSnapshot{Kind: "regular", Size: 10, Mode: 0o640, Content: []byte("same\nlocal\n"), SHA256: strings.Repeat("a", 64)}
+	remote := protocol.FileSnapshot{Kind: "regular", Size: 11, Mode: 0o600, Content: []byte("same\nremote\n"), SHA256: strings.Repeat("b", 64)}
+	var output bytes.Buffer
+	if err := writeConflictDiff(context.Background(), &output, "space name.txt", local, remote); err != nil {
+		t.Fatal(err)
+	}
+	got := output.String()
+	for _, wanted := range []string{`conflict "space name.txt" (local -> remote)`, `--- local/"space name.txt"`, `+++ remote/"space name.txt"`, "-local", "+remote", "metadata: local=regular"} {
+		if !strings.Contains(got, wanted) {
+			t.Fatalf("preview is missing %q:\n%s", wanted, got)
+		}
+	}
+
+	output.Reset()
+	remote.Content = append([]byte(nil), local.Content...)
+	remote.Size = local.Size
+	if err := writeConflictDiff(context.Background(), &output, "solve.py", local, remote); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "copies have identical content") || !strings.Contains(output.String(), "metadata:") {
+		t.Fatalf("identical content summary = %s", output.String())
+	}
+}
+
+func TestWriteConflictDiffNeverRendersControlOrUnboundedContent(t *testing.T) {
+	unsafeContent := []byte("safe\n\x1b]52;c;dGVzdA==\a")
+	local := protocol.FileSnapshot{Kind: "regular", Size: int64(len(unsafeContent)), Mode: 0o600, Content: unsafeContent, SHA256: strings.Repeat("a", 64)}
+	remote := protocol.FileSnapshot{Kind: "regular", Size: 4, Mode: 0o600, Content: []byte("safe"), SHA256: strings.Repeat("b", 64)}
+	var output bytes.Buffer
+	if err := writeConflictDiff(context.Background(), &output, "control.txt", local, remote); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(output.Bytes(), []byte{0x1b}) || !strings.Contains(output.String(), "terminal control characters") || !strings.Contains(output.String(), "sha256=") {
+		t.Fatalf("unsafe preview = %q", output.Bytes())
+	}
+
+	output.Reset()
+	local = protocol.FileSnapshot{Kind: "regular", Size: protocol.MaxConflictPreviewBytes + 1, Mode: 0o600, Omitted: true}
+	if err := writeConflictDiff(context.Background(), &output, "large.bin", local, remote); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "exceeds 1048576-byte limit") {
+		t.Fatalf("large preview = %s", output.String())
+	}
+}
+
+func TestWriteConflictDiffBoundsFinalToolDiagnostic(t *testing.T) {
 	dir := t.TempDir()
-	target := filepath.Join(dir, "outside-secret")
-	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+	diff := filepath.Join(dir, "diff")
+	script := "#!/bin/sh\ndd if=/dev/zero bs=1048576 count=1 >&2 2>/dev/null\nprintf 'final-diff-error\\n' >&2\nexit 2\n"
+	if err := os.WriteFile(diff, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "workspace-link")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	local := protocol.FileSnapshot{Kind: "regular", Size: 2, Mode: 0o600, Content: []byte("a\n")}
+	remote := protocol.FileSnapshot{Kind: "regular", Size: 2, Mode: 0o600, Content: []byte("b\n")}
+	var output bytes.Buffer
+	err := writeConflictDiff(context.Background(), &output, "solve.py", local, remote)
+	if err == nil || !strings.Contains(err.Error(), "[output truncated]") || !strings.HasSuffix(err.Error(), "final-diff-error") {
+		t.Fatalf("diff diagnostic = %q", err)
 	}
-	backup := filepath.Join(dir, "recovery", "link")
-	if err := copyPath(link, backup); err != nil {
-		t.Fatal(err)
+	if len(err.Error()) > subprocess.DiagnosticLimit+1024 {
+		t.Fatalf("diff diagnostic length = %d", len(err.Error()))
 	}
-	info, err := os.Lstat(backup)
+}
+
+func TestWriteConflictDiffSummarizesNonRegularTypes(t *testing.T) {
+	cases := []struct {
+		name   string
+		local  protocol.FileSnapshot
+		remote protocol.FileSnapshot
+		want   string
+	}{
+		{name: "links", local: protocol.FileSnapshot{Kind: "symlink", LinkTarget: "local\nlink"}, remote: protocol.FileSnapshot{Kind: "symlink", LinkTarget: "remote"}, want: `symlink -> "local\nlink"`},
+		{name: "different", local: protocol.FileSnapshot{Kind: "directory", Mode: 0o700}, remote: protocol.FileSnapshot{Kind: "missing"}, want: "endpoint types differ"},
+		{name: "special", local: protocol.FileSnapshot{Kind: "special", Mode: 0o600}, remote: protocol.FileSnapshot{Kind: "special", Mode: 0o600}, want: "unavailable for special"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var output bytes.Buffer
+			if err := writeConflictDiff(context.Background(), &output, test.name, test.local, test.remote); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(output.String(), test.want) {
+				t.Fatalf("summary = %s", output.String())
+			}
+		})
+	}
+}
+
+func TestDecodeSnapshotIsStrictAndDiffCommandIsDiscoverable(t *testing.T) {
+	var snapshot protocol.FileSnapshot
+	if err := decodeSnapshot([]byte("{\"kind\":\"regular\",\"size\":1,\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\",\"content\":\"eA==\"}\n"), &snapshot); err != nil || string(snapshot.Content) != "x" {
+		t.Fatalf("snapshot = %#v, %v", snapshot, err)
+	}
+	for _, input := range []string{
+		`{"kind":"unknown"}`,
+		`{"kind":"regular","extra":true}`,
+		`{"kind":"missing"} {"kind":"missing"}`,
+		`{"kind":"regular","size":1048577,"omitted":false}`,
+		`{"kind":"regular","size":1,"sha256":"wrong","content":"eA=="}`,
+	} {
+		if err := decodeSnapshot([]byte(input), &snapshot); err == nil {
+			t.Fatalf("unsafe snapshot %q was accepted", input)
+		}
+	}
+	app, _ := testApp(t)
+	command, _, err := app.Root().Find([]string{"sync", "diff"})
+	if err != nil || command.Name() != "diff" {
+		t.Fatalf("sync diff command = %v, %v", command, err)
+	}
+}
+
+func TestRecoveryCommandsListJSONAndRestoreWithoutOverwrite(t *testing.T) {
+	app, output := testApp(t)
+	projectRoot := t.TempDir()
+	old, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("recovery copy followed a workspace symlink")
+	if err := os.Chdir(projectRoot); err != nil {
+		t.Fatal(err)
 	}
-	if got, _ := os.Readlink(backup); got != target {
-		t.Fatalf("symlink target changed: %q", got)
+	defer os.Chdir(old)
+	effective := config.Defaults()
+	effective.Global.DefaultHost = "test"
+	effective.Global.Hosts["test"] = config.Host{
+		Destination: "pwnbox", Platform: "linux/amd64",
+		WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn",
+	}
+	if err := config.SaveGlobal(filepath.Join(app.Paths.Config, "config.toml"), effective.Global); err != nil {
+		t.Fatal(err)
+	}
+	project, err := app.loadProject(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive := recovery.ArchiveName(time.Date(2026, 7, 14, 12, 34, 56, 7, time.UTC))
+	original := "control\nname"
+	id, err := recovery.BackupID(archive, "local", original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(project.WS.RecoveryPath, id)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project.WS.RecoveryPath, id), []byte("recover me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recovery.Record(project.WS.RecoveryPath, archive, "local", original); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "sync", "recovery", "list"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "control\nname") || !strings.Contains(output.String(), `control\nname`) {
+		t.Fatalf("human recovery output was not escaped: %q", output.String())
+	}
+	output.Reset()
+	if err := execute(t, app, "sync", "recovery", "list", "--json"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"entries"`) || !strings.Contains(output.String(), `"original_path": "control\nname"`) {
+		t.Fatalf("recovery JSON = %s", output)
+	}
+	output.Reset()
+	if err := execute(t, app, "sync", "recovery", "restore", id, "--to", "recovered"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(projectRoot, "recovered"))
+	if err != nil || string(data) != "recover me" {
+		t.Fatalf("restored data = %q, %v", data, err)
+	}
+	if err := execute(t, app, "sync", "recovery", "restore", id, "--to", "recovered"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("restore overwrite returned %v", err)
+	}
+}
+
+func TestRecoveryCommandIsDiscoverableAndRequiresExplicitDestination(t *testing.T) {
+	app, _ := testApp(t)
+	command, _, err := app.Root().Find([]string{"sync", "recovery", "restore"})
+	if err != nil || command.Name() != "restore" {
+		t.Fatalf("sync recovery restore command = %v, %v", command, err)
+	}
+	if err := execute(t, app, "sync", "recovery", "restore", "id"); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("missing restore destination returned %v", err)
 	}
 }
 
@@ -609,6 +802,20 @@ func TestIgnoreParsingIsBoundedAndDoesNotImportGitignore(t *testing.T) {
 	}
 	if _, err := parseIgnores([]byte(strings.Repeat("a", 4097)), nil); err == nil {
 		t.Fatal("oversized ignore pattern was accepted")
+	}
+	ignorePath := filepath.Join(root, ".pwnbridgeignore")
+	if err := os.Remove(ignorePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(ignorePath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := projectIgnores(root, nil); err == nil {
+		t.Fatal("FIFO ignore file was accepted")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("FIFO ignore rejection took %v", elapsed)
 	}
 }
 

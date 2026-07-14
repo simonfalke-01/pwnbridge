@@ -47,12 +47,54 @@ The remote static agent owns only per-invocation work:
 There is no persistent Pwnbridge agent daemon. Content-addressed agent binaries
 remain cached for fast future invocations.
 
+Configuration discovery reads the global file and nearest ancestor project
+file through a 1 MiB ceiling. The TOML parser has an explicit nesting guard;
+strict typed decoding rejects unknown keys before semantic merging. Errors
+preserve the underlying typed decoder error while presenting only a concise
+path/position/key summary to the CLI.
+
+Host registration is a machine-global transaction and therefore loads no
+project layer. The complete candidate is semantically validated in memory,
+duplicate names require explicit replacement, and default selection is resolved
+before any optional network probe. Checked registration feeds the existing
+read-only inventory into the built-in `pwn` planner and runs the same temporary
+forwarding probe as doctor; only a complete healthy report reaches the atomic
+global-config write. A failed new or replacement check retains the previous
+durable file. The probe runs outside the config lock; commit takes the shared
+global mutation lock, reloads the latest file, rechecks duplicate/default
+semantics and the checked terminal-scope policy, and performs a short atomic
+read-modify-write. A concurrent scope change aborts checked registration;
+unrelated changes are retained. Host transport/default/removal, saved recipes,
+and bootstrap profile binding use the same transaction, so concurrent CLI
+writers do not discard unrelated changes.
+
 Bootstrap is independent of project selection and runtime configuration. A
 read-only SSH inventory feeds its typed recipe planner and host doctor. The
 client-only Bubble Tea v2 adapter renders a purpose-built inline wizard;
 execution uses one ordinary SSH PTY so visible `sudo -v` authentication is
 shared by fixed-argv steps.
 Complete logs live under XDG state and displayed output is control-sanitized.
+
+Checked registration, project doctor, and host doctor share that same
+inventory/planner boundary. Registration evaluates whether missing capabilities
+are installable by bootstrap; doctor instead treats selected missing components
+as current health failures. Local,
+inventory, and reverse-forwarding collectors receive independent derived
+contexts and append ordered typed checks to one report. A collector failure is
+data (`complete=false`) rather than a reason to discard completed results; only
+parent cancellation stops later collectors. Probes run sequentially to avoid
+simultaneous authentication/hardware-token prompts. Inventory is read-only,
+and the forwarding check owns only a temporary private control master and
+ephemeral reverse listener; doctor never deploys the agent.
+
+The support-report path is intentionally separate from logs and raw status.
+Each collector populates a typed positive allowlist; broad configuration,
+workspace, session, Mutagen, error, and inventory objects are never serialized.
+Remote free text maps through closed vocabularies, custom provider names reduce
+to their category, and failures reduce to safe error classes. Independent local,
+status, and read-only SSH deadlines plus a 1 MiB remote-inventory output cap let
+a partial report survive the subsystem being diagnosed. Output goes only to the
+requested stdout writer.
 
 ## Workspace identity and state
 
@@ -75,14 +117,64 @@ written into the portable project file. Effective host selection is the global
 default, then the project binding, then `PWNBRIDGE_HOST`, then the one-shot
 `--host` flag.
 
+Workspace and binding schema-two records also store the canonical project root;
+workspace state stores the last managed remote path and a remote-retention bit.
+Schema-one records remain strictly readable but are treated conservatively as
+legacy: their project path is unknown and their remote root is presumed
+retained. `clean` clears active sync/runtime identifiers but keeps this catalog;
+only successful `clean --remote --yes` clears remote retention. This makes host
+retirement an inventory problem instead of an unsafe one-project guess.
+
+`host remove --yes` holds the global configuration lock, reloads current config,
+and re-inventories bounded owner-private bindings, workspace records, recovery
+roots, and session leases before the atomic write. Normal removal requires no
+references. Force can preserve inactive dangling records but cannot override a
+live lease. A per-host lifecycle lease also serializes confirmed removal with
+new project binding and session startup; startup revalidates the host under that
+lease before any network work. Host removal never contacts or mutates the remote
+endpoint.
+
 Private directories are mode 0700; private files and sockets are mode 0600.
 State writes use an fsync-plus-rename atomic-write path. A cross-process file
 lock serializes barriers and identity initialization.
 
+The isolated Mutagen adapter first uses its fast, idempotent `daemon start`
+command. If that compatibility path fails, Pwnbridge invokes the documented
+`daemon run` entry point in a new session and releases it only after successful
+process creation. Cancellation is checked before any state creation, after the
+normal attempt, and immediately before fallback launch, so an expired command
+does not intentionally create a detached daemon. Fallback stdout/stderr use a
+validated descriptor for `mutagen/v0.18/daemon.log` in the real state tree;
+socket-length aliases under the temporary directory are never used to resolve
+the log path.
+
+Conflict archives use sortable nanosecond UTC directories below the workspace
+recovery path. Each new archive has a versioned, atomically replaced manifest
+that records independently restorable original paths, endpoint metadata, and a
+deterministic SHA-256 content identity.
+Inventory also recognizes the older timestamp/winner layout conservatively.
+Local backup, recursive removal, and restoration use Go's descriptor-held
+`os.Root` operations, exact-length nonblocking regular-file reads, exclusive
+destination creation, and file/directory durability syncs. A concurrent path
+replacement can cause an operation to fail or affect another object inside the
+same root, but cannot redirect it outside the held workspace or recovery root.
+
+When the remote copy loses a conflict, one no-PTY agent process writes a
+deterministic, restricted tar stream and waits. The client extracts through a
+held recovery root, rejects traversal, duplicate or out-of-order names and
+unsupported metadata/types, syncs files and directories, and atomically
+records the stream digest. Only then does it acknowledge that digest. The
+agent regenerates the archive from the same observed object and removes it
+through a held remote workspace root only when the second digest still
+matches. Its final result must match the durable local summary. A failure
+before acknowledgement preserves the remote copy; a transport failure after
+acknowledgement is reported as uncertain together with the durable backup
+path.
+
 Remote paths are similarly scoped below the user's home:
 
 ```text
-~/.local/share/pwnbridge/agents/3/<sha256>/pwnbridge-agent
+~/.local/share/pwnbridge/agents/4/<sha256>/pwnbridge-agent
 ~/.local/share/pwnbridge/workspaces/<machine-id>/<slug-hash>/
 ~/.cache/pwnbridge/sessions/<session-id>/
 ```
@@ -111,6 +203,13 @@ This gives two important guarantees:
 - save then immediately press Enter: the remote command observes the save;
 - generate a core/log/patched binary: the local file exists before the next
   managed prompt is visible.
+
+When a conflict blocks that barrier, `sync diff` inspects only exact paths from
+the current Mutagen conflict set. Both endpoints are traversed from opened
+workspace directory descriptors without following symlinks. The bundled agent
+returns at most 1 MiB of regular-file content; the client renders unified
+local-to-remote output only for display-safe UTF-8 and emits bounded metadata
+for every other type. Inspection does not resume or mutate synchronization.
 
 One-shot `run` performs the same pre/post barriers without prompt markers.
 
@@ -183,7 +282,10 @@ The client sends discrete argv/environment fields through one SSH PTY; the
 agent emits authentication, start, output, completion, and failure events.
 Bubble Tea, Bubbles, and Lip Gloss remain confined to the Darwin client
 dependency graph. The adapter uses no alternate screen and includes only the
-selection and text-entry models needed by bootstrap.
+selection and text-entry models needed by bootstrap. The coordinated renderer
+stack is covered by model/program integration and bounded Unicode fuzz tests so
+wide/joining grapheme fixes cannot silently regress inline width or input
+restoration.
 
 The Linux agent is built with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`. Deployment
 probes the remote platform, uploads to a unique temporary file, verifies SHA-256
@@ -254,6 +356,19 @@ session. It mounts the workspace at `/work`, private session state at
 `/run/pwnbridge`, and the agent wrapper read-only; runs as the remote UID/GID;
 adds `SYS_PTRACE` and `seccomp=unconfined`; and never mounts an engine socket.
 Python, process, gdbserver, manifest reader, and GDB use that same container ID.
+An absent image is the only streamed setup operation: terminals receive the
+engine's native pull bytes as they arrive, while non-terminals use quiet mode.
+Signal-aware setup kills and reaps the engine client before normal signal
+handling is restored and the agent replaces itself with the requested process.
+
+Captured local-tool output is classified by contract rather than one global
+limit. Fixed identifiers/booleans and runtime management use 64 KiB; custom
+provider JSON uses 1 MiB; complete Zellij/WezTerm/Kitty inventories use 4 MiB;
+Mutagen management uses 1 MiB; and conflict-bearing Mutagen state uses 16 MiB.
+Structured stdout retains a prefix and fails on overflow, while failure
+diagnostics retain a 64 KiB tail. All collectors keep draining and inherit the
+common context/one-second descriptor shutdown bound. User command, terminal,
+bootstrap, and recovery archive streams are not captured by this layer.
 
 ## Shutdown and recovery
 
@@ -273,3 +388,34 @@ Deleting a remote root is not interpreted as a request to propagate deletion.
 Pwnbridge validates an existing root before resuming; if it vanished or became
 a symlink, execution remains blocked until the user verifies local data and
 explicitly creates new synchronization history with `clean`.
+
+Conflict recovery is independent of session liveness. `sync recovery list`
+reads only the local catalog, and `sync recovery restore` creates a new,
+non-existing project-relative target under the workspace lock. It does not
+resume or flush Mutagen implicitly, and it retains the source recovery copy.
+Cataloged entries are hashed before copying and the new destination is hashed
+again before success is reported; older manifest and pre-manifest entries
+without a digest remain explicitly unverified for compatibility.
+
+`sync recovery verify` takes the same workspace lock and regenerates each
+selected deterministic identity directly from the descriptor-rooted recovery
+tree. It is sequential, context-cancelable, and read-only: later entries remain
+checkable after an individual mismatch, while a structurally corrupt catalog
+fails enumeration rather than guessing recovery boundaries. It never starts
+Mutagen or SSH and never records a digest for legacy content. The same archive
+reader optionally reports monotonic source bytes/items, so terminal progress
+does not require a second traversal or affect deterministic bytes. Progress is
+transient stderr state; final human/schema-one JSON reports retain completed
+entries and exact checked/total counts if parent cancellation interrupts a
+later entry.
+
+`sync recovery prune` aggregates that strict catalog into timestamped whole
+resolution archives and retains at least the requested newest count. Preview is
+read-only; confirmed pruning holds the workspace lock and stays entirely local.
+Each selected archive is renamed through the held recovery root to an exact
+random hidden tombstone and the root directory is synced before recursive
+reclamation begins. Catalog visibility therefore changes atomically: a crash
+leaves either the intact visible archive or an ignored tombstone, never a
+visible half-deleted manifest tree. Descriptor-rooted, same-filesystem,
+context-checked removal does not follow links or cross mount boundaries. The
+next confirmed prune removes valid stale tombstones before selecting new work.

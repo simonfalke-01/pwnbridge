@@ -27,9 +27,21 @@ cp "$ROOT/../flag.txt" "$TMP/challenge/flag.txt"
 chmod +x "$TMP/challenge/ret2win"
 
 cd "$TMP/challenge"
-"$ROOT/bin/pwnbridge" host add lima lima-pwn
+HOST_ADD_JSON=$("$ROOT/bin/pwnbridge" host add lima lima-pwn --check --json)
+printf '%s' "$HOST_ADD_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["persisted"] is True and d["default"] is True and d["replaced"] is False; assert d["check"]["ok"] is True and d["check"]["complete"] is True'
+if "$ROOT/bin/pwnbridge" host add lima lima-pwn; then
+    echo "expected duplicate host registration to require --replace" >&2
+    exit 1
+fi
+"$ROOT/bin/pwnbridge" host add retire-me lima-pwn
+REMOVE_PREVIEW=$("$ROOT/bin/pwnbridge" host remove retire-me --dry-run --json)
+printf '%s' "$REMOVE_PREVIEW" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["dry_run"] is True and d["safe"] is True and d["allowed"] is True and d["removed"] is False'
+REMOVE_RESULT=$("$ROOT/bin/pwnbridge" host remove retire-me --yes --json)
+printf '%s' "$REMOVE_RESULT" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["dry_run"] is False and d["safe"] is True and d["allowed"] is True and d["removed"] is True'
 "$ROOT/bin/pwnbridge" host use lima
-"$ROOT/bin/pwnbridge" doctor --json || true
+DOCTOR_JSON=$("$ROOT/bin/pwnbridge" doctor --json || true)
+printf '%s' "$DOCTOR_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["complete"] is True; names={c["name"] for c in d["checks"]}; assert "remote-platform" in names and "ssh-reverse-forwarding" in names and "diagnostic-agent" not in names'
+"$ROOT/bin/pwnbridge" support --local-only --json
 "$ROOT/bin/pwnbridge" run -- file ./ret2win
 "$ROOT/bin/pwnbridge" run -- sh -c 'printf "AAAA\n" | ./ret2win | grep -q x86_64'
 "$ROOT/bin/pwnbridge" run -- sh -c 'printf remote-artifact > generated.txt'
@@ -77,7 +89,18 @@ if "$ROOT/bin/pwnbridge" run -- true; then
     exit 1
 fi
 "$ROOT/bin/pwnbridge" sync conflicts
+CONFLICT_DIFF=$("$ROOT/bin/pwnbridge" sync diff -- conflict.txt)
+printf '%s\n' "$CONFLICT_DIFF" | grep -F -- 'conflict "conflict.txt" (local -> remote)'
+printf '%s\n' "$CONFLICT_DIFF" | grep -F -- '-local-wins'
+printf '%s\n' "$CONFLICT_DIFF" | grep -F -- '+remote-loses'
 "$ROOT/bin/pwnbridge" sync resolve --prefer local -- conflict.txt
+RECOVERY_JSON=$("$ROOT/bin/pwnbridge" sync recovery list --json)
+RECOVERY_ID=$(printf '%s' "$RECOVERY_JSON" | python3 -c 'import json,sys; entries=json.load(sys.stdin)["data"]["entries"]; entry=next(e for e in entries if e["original_path"] == "conflict.txt" and e["loser"] == "remote"); assert len(entry["sha256"]) == 64; print(entry["id"])')
+"$ROOT/bin/pwnbridge" sync recovery verify "$RECOVERY_ID"
+VERIFY_JSON=$("$ROOT/bin/pwnbridge" sync recovery verify "$RECOVERY_ID" --json)
+printf '%s' "$VERIFY_JSON" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["complete"] is True and d["checked"] == d["total"] == 1 and d["entries"][0]["status"] == "verified"'
+"$ROOT/bin/pwnbridge" sync recovery restore "$RECOVERY_ID" --to conflict.remote-recovered
+test "$(cat conflict.remote-recovered)" = remote-loses
 # Expansion intentionally occurs in the remote shell.
 # shellcheck disable=SC2016
 "$ROOT/bin/pwnbridge" run -- sh -c 'test "$(cat conflict.txt)" = local-wins'
@@ -93,6 +116,14 @@ if "$ROOT/bin/pwnbridge" run -- true; then
 fi
 "$ROOT/bin/pwnbridge" sync resolve --prefer local -- "space name.txt"
 test "$(cat "space name.txt")" = local-space-wins
+PRUNE_PREVIEW=$("$ROOT/bin/pwnbridge" sync recovery prune --keep-last 1 --dry-run --json)
+printf '%s' "$PRUNE_PREVIEW" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["complete"] is True and d["dry_run"] is True and d["kept"] == d["selected"] == 1 and d["pruned"] == 0'
+PRUNE_RESULT=$("$ROOT/bin/pwnbridge" sync recovery prune --keep-last 1 --yes --json)
+printf '%s' "$PRUNE_RESULT" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; assert d["complete"] is True and d["kept"] == d["selected"] == d["pruned"] == 1 and d["pending_cleanup"] == 0'
+if "$ROOT/bin/pwnbridge" sync recovery verify "$RECOVERY_ID"; then
+    echo "expected pruned recovery ID to be unavailable" >&2
+    exit 1
+fi
 
 # shellcheck disable=SC2029
 ssh lima-pwn "rm -rf -- \"\$HOME/$REMOTE_REL\""

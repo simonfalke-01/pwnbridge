@@ -19,6 +19,8 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
+const maxConfigBytes = 1 << 20
+
 type Host struct {
 	Destination      string `toml:"destination" json:"destination"`
 	Platform         string `toml:"platform" json:"platform"`
@@ -311,7 +313,7 @@ func LoadGlobal(p paths.Paths) (Effective, error) {
 }
 
 func decodeOptional(path string, target any) error {
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFileLimit(path, maxConfigBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -321,9 +323,36 @@ func decodeOptional(path string, target any) error {
 	dec := toml.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
+		return contextualDecodeError(path, err)
 	}
 	return nil
+}
+
+func contextualDecodeError(path string, err error) error {
+	var strict *toml.StrictMissingError
+	if errors.As(err, &strict) && len(strict.Errors) > 0 {
+		first := &strict.Errors[0]
+		line, column := first.Position()
+		key := strings.Join(first.Key(), ".")
+		if key == "" {
+			key = "unknown"
+		}
+		remaining := ""
+		if count := len(strict.Errors) - 1; count > 0 {
+			remaining = fmt.Sprintf(" (and %d more unknown key(s))", count)
+		}
+		return fmt.Errorf("decode %s:%d:%d: unknown configuration key %q%s: %w", path, line, column, key, remaining, err)
+	}
+	var decode *toml.DecodeError
+	if errors.As(err, &decode) {
+		line, column := decode.Position()
+		key := strings.Join(decode.Key(), ".")
+		if key != "" {
+			return fmt.Errorf("decode %s:%d:%d at %q: %w", path, line, column, key, err)
+		}
+		return fmt.Errorf("decode %s:%d:%d: %w", path, line, column, err)
+	}
+	return fmt.Errorf("decode %s: %w", path, err)
 }
 
 func FindProject(start string) (configPath, root string, err error) {

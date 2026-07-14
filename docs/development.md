@@ -21,9 +21,13 @@ make fuzz-smoke FUZZTIME=15s
 make security
 ```
 
-Fuzz targets cover strict TOML, framed JSON protocol, PTY prompt markers,
-Mutagen health JSON, ignore parsing, and workspace slug generation. CI runs
-each target independently.
+Thirteen fuzz targets cover strict TOML, framed JSON protocol, PTY prompt
+markers, bounded subprocess prefix/tail retention, Mutagen health JSON, ignore
+parsing, workspace slug generation, bootstrap/event data, recovery archives,
+diagnostic text, build metadata, and bounded Unicode wizard rendering. The
+wizard target checks real no-color view width and selection invariants across
+CJK, combining/joining, emoji, and RTL seeds, with a per-render deadline that
+catches renderer loops. CI runs each target independently.
 
 Security checks use pinned govulncheck and gosec versions. Gosec exclusions are
 limited to categories that are architectural false positives here: structured
@@ -37,13 +41,43 @@ code and documented with narrow `#nosec` annotations.
 Package tests include:
 
 - strict config precedence/schema/value validation;
-- workspace identity, state, locks, and safe recovery copies;
+- bounded pathological TOML nesting, positioned/keyed decode errors, strict
+  error wrapping, Unicode wizard widths, pipe/disabled input, and renderer
+  deadline behavior;
+- workspace identity, schema-one migration, bounded global lifecycle catalogs,
+  safe host-retirement previews/confirmation, state, locks, descriptor-rooted recovery copies,
+  deterministic archives, durable digest manifests, legacy inventory,
+  context-cancelable proactive integrity checks, verified exclusive
+  restoration, whole-archive retention/pruning, durable tombstone rollback and
+  retry, mount/link containment, and hostile-stream rejection;
+- descriptor-rooted local/remote conflict snapshots and control-safe unified
+  previews;
+- subprocess-level remote recovery streaming, durable acknowledgement, source
+  change detection, strict result decoding, and bounded diagnostics;
+- privacy-allowlisted support reports, narrow build-metadata grammar fuzzing,
+  invalid-config partial output, hostile remote text rejection, local-only
+  network exclusion, and forbidden-value sentinels across Markdown and JSON;
 - Mutagen version/argv/health/conflict parsing with captured 0.18.1 fixtures;
+- isolated Mutagen startup cancellation, long-path alias validation, private
+  descriptor logging, special-file rejection, oversized-log rotation, 16 MiB
+  structured-state acceptance, and bounded final diagnostics;
+- read-only partial-result doctor collection, independent timeout/cancellation,
+  recipe parity, configured runtime/transport checks, control-safe bounded
+  reports, write failure, and small-protocol SSH output floods;
+- transactional checked host registration, duplicate/replace/default semantics,
+  project-config independence, installable-versus-blocked plans, required and
+  optional forwarding, serialized fresh-read global commits, no-write failure,
+  cancellation, and forbidden remote mutation transcripts;
+- monotonic deterministic-archive byte/item progress, TTY-only throttled
+  recovery status, partial cancellation reports, checked/total JSON, maximum
+  snapshot responses, and bounded SSH management/forwarding/SCP floods;
 - OpenSSH/scp and Mosh argv, agent deployment, stream-local and TCP/socat fallback;
 - PTY marker chunk boundaries and terminal restoration;
 - broker authentication, shell barriers, rate/pane limits, lifecycle, and runtime authority;
-- fake Zellij/tmux/WezTerm/Kitty/iTerm/Terminal/custom provider lifecycle;
-- Docker/Podman command construction and same-runtime cwd/environment;
+- fake Zellij/tmux/WezTerm/Kitty/iTerm/Terminal/custom provider lifecycle,
+  exact inventory/protocol limits, output floods, and final diagnostic tails;
+- Docker/Podman command construction, same-runtime cwd/environment, terminal
+  pull streaming, non-terminal quiet mode, signal reaping, and bounded replies;
 - hostile IDs, path escapes, frame caps, and broker-address validation.
 
 ## Lima end-to-end environment
@@ -64,7 +98,7 @@ Individual scenarios:
 
 | Script | Coverage |
 |---|---|
-| `lima.sh` | real ret2win, x86-64, artifacts, conflicts/spaces, root deletion |
+| `lima.sh` | checked host registration, real ret2win, x86-64, artifacts, conflict previews/resolution/recovery/pruning/spaces, root deletion |
 | `lima-shell.sh` | SSH save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
 | `lima-mosh.sh` | explicit roaming Mosh, no exit banner, remote pre/post barriers, artifacts, resize |
 | `lima-disconnect.sh` | forced SSH-master loss, terminal restoration, reconnect, preserved data |
@@ -72,7 +106,7 @@ Individual scenarios:
 | `lima-gdb-tui.sh` | real GDB TUI PTY and 30x90 to 45x120 resize propagation |
 | `lima-pwntools-dev.sh` | pinned current pwntools 5-dev behavior |
 | `lima-pwndbg.sh` | isolated optional Pwndbg executable |
-| `lima-container.sh` | basic Podman runtime and artifact sync |
+| `lima-container.sh` | basic Podman runtime, quiet non-terminal setup, and artifact sync |
 | `lima-container-gdb.sh` | debug/attach/API in one container namespace |
 | `lima-remote-mux.sh` | explicit visible remote tmux pane |
 | `lima-no-forward.sh` | ordinary fallback plus remote-mux GDB when reverse forwarding is prohibited |
@@ -126,6 +160,9 @@ registry attestation.
 - Add an amd64 end-to-end case for changes to PTY, broker, runtime, or sync
   ordering.
 - Keep client/agent/provider/config protocols independently versioned.
+- Upgrade the coordinated Bubble Tea/Bubbles/Lip Gloss/x-ansi stack together;
+  review upstream renderer behavior, transitive graph, Unicode fuzzing, and
+  Darwin package size before accepting it.
 
 ## Repository layout
 

@@ -1,13 +1,23 @@
 package transport
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/simonfalke-01/pwnbridge/internal/protocol"
 )
 
 func TestCanceledCommandsPreserveContextError(t *testing.T) {
@@ -34,6 +44,272 @@ func TestCanceledCommandsPreserveContextError(t *testing.T) {
 				t.Fatalf("cancellation was obscured by process error: %v", err)
 			}
 		})
+	}
+}
+
+func TestRawBoundedCapsAndDrainsCombinedOutput(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf 'abcdefgh'\nprintf 'ijklmnop' >&2\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	client := Client{SSH: ssh, Destination: "fake"}
+	output, err := client.RawBounded(context.Background(), "ignored", 10)
+	if err == nil || !strings.Contains(err.Error(), "exceeded 10-byte limit") {
+		t.Fatalf("bounded output error = %v", err)
+	}
+	if len(output) != 10 {
+		t.Fatalf("bounded output length = %d, want 10", len(output))
+	}
+	if _, err := client.RawBounded(context.Background(), "ignored", 0); err == nil {
+		t.Fatal("non-positive output limit was accepted")
+	}
+}
+
+func TestSmallProtocolProbesBoundOutputAndInheritedDescriptors(t *testing.T) {
+	t.Run("basic output", func(t *testing.T) {
+		dir := t.TempDir()
+		ssh := filepath.Join(dir, "ssh")
+		if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '__PWNBRIDGE_HOME__/home/pwner\\n__PWNBRIDGE_OS__Linux\\n__PWNBRIDGE_ARCH__x86_64\\n'\ndd if=/dev/zero bs=70000 count=1 2>/dev/null\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (Client{SSH: ssh, Destination: "fake"}).BasicProbe(context.Background()); err == nil || !strings.Contains(err.Error(), "65536-byte limit") {
+			t.Fatalf("basic probe flood returned %v", err)
+		}
+	})
+
+	t.Run("agent output", func(t *testing.T) {
+		dir := t.TempDir()
+		ssh := filepath.Join(dir, "ssh")
+		if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '{\"protocol\":4,\"os\":\"linux\",\"architecture\":\"amd64\"}'\ndd if=/dev/zero bs=1048577 count=1 2>/dev/null\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (Client{SSH: ssh, Destination: "fake", AgentPath: "/agent"}).ProbeAgent(context.Background()); err == nil || !strings.Contains(err.Error(), "1048576-byte limit") {
+			t.Fatalf("agent probe flood returned %v", err)
+		}
+	})
+
+	t.Run("inherited descriptor", func(t *testing.T) {
+		dir := t.TempDir()
+		ssh := filepath.Join(dir, "ssh")
+		if err := os.WriteFile(ssh, []byte("#!/bin/sh\nsleep 4 &\nprintf '__PWNBRIDGE_HOME__/home/pwner\\n__PWNBRIDGE_OS__Linux\\n__PWNBRIDGE_ARCH__x86_64\\n'\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		_, err := (Client{SSH: ssh, Destination: "fake"}).BasicProbe(context.Background())
+		if !errors.Is(err, exec.ErrWaitDelay) {
+			t.Fatalf("inherited probe descriptor returned %v", err)
+		}
+		if elapsed := time.Since(started); elapsed > 2*time.Second {
+			t.Fatalf("inherited probe descriptor remained open for %v", elapsed)
+		}
+	})
+}
+
+func TestManagementResponsesAreBoundedAndAcceptMaximumSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	response := filepath.Join(dir, "response")
+	script := `#!/bin/sh
+case "$PWNBRIDGE_TRANSPORT_TEST_MODE" in
+  response) cat "$PWNBRIDGE_TRANSPORT_TEST_RESPONSE" ;;
+  inherited) sleep 4 & printf '{}' ;;
+  *) dd if=/dev/zero bs=1048576 count=3 2>/dev/null ;;
+esac
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_RESPONSE", response)
+	client := Client{SSH: ssh, Destination: "fake", AgentPath: "/agent"}
+
+	if output, err := client.Raw(context.Background(), "ignored"); err == nil || !strings.Contains(err.Error(), "1048576-byte limit") || len(output) != maxSSHCommandOutputBytes {
+		t.Fatalf("ordinary management flood = %d bytes, %v", len(output), err)
+	}
+	master := &Master{Client: client, ControlPath: "/control"}
+	if output, err := master.Run(context.Background(), "snapshot", protocol.SnapshotRequest{Root: "/tmp", Path: "x"}); err == nil || !strings.Contains(err.Error(), "2097152-byte limit") || len(output) != maxAgentResponseBytes {
+		t.Fatalf("agent management flood = %d bytes, %v", len(output), err)
+	}
+	if err := master.ConfigureBroker(context.Background(), "/local.sock", "/remote.sock", ""); err == nil || !strings.Contains(err.Error(), "65536-byte limit") {
+		t.Fatalf("forwarding management flood returned %v", err)
+	}
+
+	snapshot := protocol.FileSnapshot{Kind: "regular", Size: protocol.MaxConflictPreviewBytes, Mode: 0o600, Content: bytes.Repeat([]byte("x"), protocol.MaxConflictPreviewBytes)}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) <= maxAgentProbeOutputBytes || len(data) >= maxAgentResponseBytes {
+		t.Fatalf("maximum snapshot JSON size = %d", len(data))
+	}
+	if err := os.WriteFile(response, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_MODE", "response")
+	output, err := master.Run(context.Background(), "snapshot", protocol.SnapshotRequest{Root: "/tmp", Path: "x"})
+	if err != nil || !bytes.Equal(output, data) {
+		t.Fatalf("maximum snapshot response = %d bytes, %v", len(output), err)
+	}
+
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_MODE", "inherited")
+	started := time.Now()
+	if _, err := master.Run(context.Background(), "broker-ping", protocol.BrokerPing{}); !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("inherited agent response descriptor returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("inherited agent response descriptor remained open for %v", elapsed)
+	}
+}
+
+func TestAgentUploadBoundsSCPDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	asset := filepath.Join(dir, "agent")
+	content := []byte("agent")
+	if err := os.WriteFile(asset, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	temporary := "/home/pwner/.cache/pwnbridge/upload-" + digest + ".test"
+	ssh := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+case "$*" in
+  *"__PWNBRIDGE_HOME__"*) printf '__PWNBRIDGE_HOME__/home/pwner\n__PWNBRIDGE_OS__Linux\n__PWNBRIDGE_ARCH__x86_64\n' ;;
+  *"test -x"*) exit 1 ;;
+  *"mktemp"*) printf '%s' "$PWNBRIDGE_TRANSPORT_TEST_TEMP" ;;
+esac
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	scp := filepath.Join(dir, "scp")
+	if err := os.WriteFile(scp, []byte("#!/bin/sh\ndd if=/dev/zero bs=70000 count=1 2>/dev/null\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_TEMP", temporary)
+	_, err := (Client{SSH: ssh, SCP: scp, Destination: "fake"}).DeployAgent(context.Background(), asset)
+	if err == nil || !strings.Contains(err.Error(), "SCP output exceeded 65536-byte limit") {
+		t.Fatalf("SCP diagnostic flood returned %v", err)
+	}
+}
+
+func TestMasterCloseBoundsControlCommand(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexec sleep 4\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	master := &Master{Client: Client{SSH: ssh, Destination: "fake"}, ControlPath: "/control", closeTimeout: 100 * time.Millisecond}
+	started := time.Now()
+	if err := master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("SSH control command blocked close for %v", elapsed)
+	}
+}
+
+func TestMasterCloseIsConcurrentAndIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "close.log")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf x >> \"$PWNBRIDGE_TRANSPORT_TEST_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_LOG", logPath)
+	master := &Master{Client: Client{SSH: ssh, Destination: "fake"}, ControlPath: "/control"}
+	var wait sync.WaitGroup
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_ = master.Close()
+		}()
+	}
+	wait.Wait()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "x" {
+		t.Fatalf("close command ran %d times", len(data))
+	}
+}
+
+func TestControlMasterBoundsInheritedOutputPipes(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	pidPath := filepath.Join(dir, "child.pid")
+	script := `#!/bin/sh
+for arg in "$@"; do
+  if test "$arg" = "-M"; then
+    sleep 30 &
+    printf '%s' "$!" > "$PWNBRIDGE_TRANSPORT_TEST_PID"
+    exit 0
+  fi
+done
+exit 1
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_PID", pidPath)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			return
+		}
+		pid, err := strconv.Atoi(string(data))
+		if err == nil {
+			if process, findErr := os.FindProcess(pid); findErr == nil {
+				_ = process.Kill()
+			}
+		}
+	})
+	started := time.Now()
+	_, err := (Client{SSH: ssh, Destination: "fake"}).StartControlMaster(context.Background(), dir)
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("control master with inherited output pipe returned %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("control master output pipe remained open for %v", elapsed)
+	}
+}
+
+func TestMasterCloseReapsProcessAfterForcedKill(t *testing.T) {
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("sh", "-c", `trap '' INT; : > "$PWNBRIDGE_TRANSPORT_TEST_READY"; exec sleep 30`)
+	cmd.Env = append(os.Environ(), "PWNBRIDGE_TRANSPORT_TEST_READY="+ready)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			t.Fatal("interrupt-ignoring master did not become ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	master := &Master{process: cmd, done: done}
+	started := time.Now()
+	if err := master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("interrupt-ignoring master blocked close for %v", elapsed)
+	}
+	if cmd.ProcessState == nil {
+		t.Fatalf("master process was not reaped: %#v", cmd.ProcessState)
+	}
+	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+		t.Fatalf("master process status = %#v, want SIGKILL", cmd.ProcessState)
 	}
 }
 
@@ -68,6 +344,32 @@ func TestFindAgentAssetResolvesHomebrewExecutableSymlink(t *testing.T) {
 	}
 	if !ok || got != want {
 		t.Fatalf("got asset %q, ok=%t; want %q", got, ok, want)
+	}
+}
+
+func TestAgentAssetMustBeBoundedRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "agent-fifo")
+	if err := syscall.Mkfifo(fifo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindAgentAsset(fifo); err == nil {
+		t.Fatal("FIFO agent asset was accepted")
+	}
+	oversized := filepath.Join(dir, "agent-oversized")
+	file, err := os.OpenFile(oversized, os.O_CREATE|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxAgentAssetBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Client{}).DeployAgent(context.Background(), oversized); err == nil {
+		t.Fatal("oversized agent asset was accepted")
 	}
 }
 
@@ -177,9 +479,11 @@ case " $* " in
   *" -O check "*) exit 0 ;;
   *" -O exit "*) exit 0 ;;
   *" -O forward -R 127.0.0.1:0:127.0.0.1:9 "*)
-    test "${PWNBRIDGE_TRANSPORT_TEST_STATUS:-0}" = 0 || exit 1
-    printf 43123
-    exit 0 ;;
+	 case "${PWNBRIDGE_TRANSPORT_TEST_STATUS:-0}" in
+	   0) printf 43123; exit 0 ;;
+	   2) dd if=/dev/zero bs=70000 count=1 2>/dev/null; exit 0 ;;
+	   *) exit 1 ;;
+	 esac ;;
   *" -M -N "*) trap 'exit 0' INT TERM; while :; do sleep 1; done ;;
 esac
 exit 42
@@ -205,6 +509,10 @@ exit 42
 	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_STATUS", "1")
 	if err := client.CheckRemoteForwarding(context.Background()); err == nil {
 		t.Fatal("disabled reverse forwarding was accepted")
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_STATUS", "2")
+	if err := client.CheckRemoteForwarding(context.Background()); err == nil || !strings.Contains(err.Error(), "65536-byte limit") {
+		t.Fatalf("forwarding output flood returned %v", err)
 	}
 }
 

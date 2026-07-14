@@ -11,7 +11,7 @@ const (
 	ProjectConfigSchema = 1
 	// ConfigSchema is retained for version output and means the global schema.
 	ConfigSchema     = GlobalConfigSchema
-	ProtocolVersion  = 3
+	ProtocolVersion  = 4
 	ProviderProtocol = 1
 	MutagenVersion   = "0.18.1"
 )

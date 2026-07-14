@@ -39,6 +39,7 @@ cross-build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -o bin/cross/pwnbridge-agent-linux-amd64 ./cmd/pwnbridge-agent
 	test "$$(wc -c < bin/cross/pwnbridge-darwin-arm64)" -le 16777216
 	test "$$(wc -c < bin/cross/pwnbridge-darwin-amd64)" -le 16777216
+	test "$$(wc -c < bin/cross/pwnbridge-agent-linux-amd64)" -le 16777216
 	! $(GO) list -deps ./cmd/pwnbridge-agent | grep -E 'charm.land/(bubbles|bubbletea|lipgloss)'
 
 verify: fmt-check
@@ -50,10 +51,15 @@ verify: fmt-check
 fuzz-smoke:
 	$(GO) test ./internal/bootstrap -run '^$$' -fuzz FuzzPortableRequirements -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/bootstrap -run '^$$' -fuzz FuzzBootstrapEventParsing -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/bootstrap/ui -run '^$$' -fuzz FuzzChoiceModelUnicode -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/config -run '^$$' -fuzz FuzzStrictProjectTOML -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/diagnostics -run '^$$' -fuzz FuzzDiagnosticDetail -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/protocol -run '^$$' -fuzz FuzzDecode -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/recovery -run '^$$' -fuzz FuzzExtractArchive -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/shell -run '^$$' -fuzz FuzzMarker -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/subprocess -run '^$$' -fuzz FuzzBoundedWriter -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/syncer -run '^$$' -fuzz FuzzMutagenHealthJSON -fuzztime=$(FUZZTIME)
+	$(GO) test ./internal/cli -run '^$$' -fuzz FuzzSupportReleaseVersion -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/cli -run '^$$' -fuzz FuzzIgnoreParser -fuzztime=$(FUZZTIME)
 	$(GO) test ./internal/workspace -run '^$$' -fuzz FuzzWorkspaceSlug -fuzztime=$(FUZZTIME)
 

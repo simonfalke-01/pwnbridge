@@ -29,6 +29,7 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/identity"
 	"github.com/simonfalke-01/pwnbridge/internal/paths"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/recovery"
 	"github.com/simonfalke-01/pwnbridge/internal/shell"
 	"github.com/simonfalke-01/pwnbridge/internal/syncer"
 	"github.com/simonfalke-01/pwnbridge/internal/terminal/provider"
@@ -102,7 +103,7 @@ func (a *App) Root() *cobra.Command {
 	root.PersistentFlags().StringVar(&a.HostFlag, "host", "", "override the configured remote host")
 	root.AddCommand(
 		&cobra.Command{Use: "shell", Short: "Open the managed remote shell", Long: "Open managed remote Bash in the current terminal. The default auto transport uses pwnbridge predictive echo over inline SSH. Select ssh for plain SSH or mosh for an explicit roaming, full-screen Mosh session.", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error { return a.shell(cmd.Context()) }},
-		a.runCommand(), a.initCommand(), a.statusCommand(), a.doctorCommand(), a.stopCommand(), a.cleanCommand(),
+		a.runCommand(), a.initCommand(), a.statusCommand(), a.doctorCommand(), a.supportCommand(), a.stopCommand(), a.cleanCommand(),
 		a.hostCommand(), a.syncCommand(), a.terminalCommand(), a.runtimeCommand(), a.configCommand(), a.versionCommand(),
 		a.paneCommand(),
 	)
@@ -157,7 +158,7 @@ func (a *App) loadProject(ctx context.Context, requireHost bool) (*projectContex
 	effective.SelectedHost = hostID
 	if hostID == "" {
 		if requireHost {
-			return nil, errors.New("no host selected; run `pwnbridge host add NAME DESTINATION`, then `pwnbridge host default NAME` or `pwnbridge host use NAME`")
+			return nil, errors.New("no host selected; run `pwnbridge host add NAME DESTINATION --check` (the first host becomes default), or select one with `pwnbridge host default NAME` or `pwnbridge host use NAME`")
 		}
 		mutagen := syncer.Mutagen{Runner: syncer.DefaultRunner(effective.MutagenPath, a.Paths.State)}
 		return &projectContext{Config: effective, Manager: manager, Sync: mutagen}, nil
@@ -202,11 +203,11 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext, client transpor
 		remoteOperation = "test -d " + remotePath + " && test ! -L " + remotePath
 		operation = "validate"
 	}
-	if output, remoteErr := client.Raw(ctx, remoteOperation); remoteErr != nil {
+	if _, remoteErr := client.Raw(ctx, remoteOperation); remoteErr != nil {
 		if operation == "validate" {
-			return fmt.Errorf("remote workspace root is missing or was replaced; execution is blocked to protect the local copy. Verify local files, then run `pwnbridge clean` to explicitly create new synchronization history: %w: %s", remoteErr, strings.TrimSpace(string(output)))
+			return fmt.Errorf("remote workspace root is missing or was replaced; execution is blocked to protect the local copy. Verify local files, then run `pwnbridge clean` to explicitly create new synchronization history: %w", remoteErr)
 		}
-		return fmt.Errorf("create remote workspace: %w: %s", remoteErr, strings.TrimSpace(string(output)))
+		return fmt.Errorf("create remote workspace: %w", remoteErr)
 	}
 	ignores, err := projectIgnores(p.Config.ProjectRoot, p.Config.Project.Workspace.Ignore)
 	if err != nil {
@@ -218,6 +219,7 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext, client transpor
 	if err := p.Sync.Ensure(timeout, spec, &p.State); err != nil {
 		return err
 	}
+	p.State.RemoteRetained = true
 	if err := p.Manager.SaveState(p.WS, p.State); err != nil {
 		return err
 	}
@@ -290,6 +292,22 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 	progress.Stage("Checking workspace")
 	if err := guardImplicitWorkspace(p.Config.ProjectRoot, p.Config.ProjectPath); err != nil {
 		return nil, err
+	}
+	hostLifecycle, err := workspace.AcquireLock(a.hostLifecycleLockPath(p.HostID))
+	if err != nil {
+		return nil, fmt.Errorf("acquire host lifecycle lease: %w", err)
+	}
+	defer func() {
+		if hostLifecycle != nil {
+			resultErr = errors.Join(resultErr, hostLifecycle.Close())
+		}
+	}()
+	latest, err := config.LoadGlobal(a.Paths)
+	if err != nil {
+		return nil, err
+	}
+	if current, ok := latest.Global.Hosts[p.HostID]; !ok || current != p.Host {
+		return nil, fmt.Errorf("host %q was removed or changed; retry with current configuration", p.HostID)
 	}
 	if _, err := a.liveSessions(p.WS.LocalRoot); err != nil {
 		return nil, err
@@ -375,8 +393,8 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 	localSocket := filepath.Join(runtimeDir, "b.sock")
 	remoteSocket := filepath.Join(remoteDir, "broker.sock")
 	prepare := "umask 077; mkdir -p -- " + remoteShellPath(filepath.Join(remoteDir, "requests"))
-	if output, prepareErr := client.Raw(ctx, prepare); prepareErr != nil {
-		return nil, fmt.Errorf("create remote session directory: %w: %s", prepareErr, strings.TrimSpace(string(output)))
+	if _, prepareErr := client.Raw(ctx, prepare); prepareErr != nil {
+		return nil, fmt.Errorf("create remote session directory: %w", prepareErr)
 	}
 	recordPath = filepath.Join(a.Paths.State, "sessions", id+".json")
 	leasePath = recordPath + ".lease"
@@ -447,6 +465,11 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 	// rather than exposing a half-initialized broker verification window.
 	if err := broker.SaveSession(recordPath, record); err != nil {
 		return nil, err
+	}
+	closeErr := hostLifecycle.Close()
+	hostLifecycle = nil
+	if closeErr != nil {
+		return nil, closeErr
 	}
 	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Probe: probe, Lease: lease}, nil
 }
@@ -611,7 +634,7 @@ func shellTransport(host config.Host, terminalScope string, session *activeSessi
 		return "mosh", nil
 	}
 	if wanted == "mosh" {
-		return "", fmt.Errorf("Mosh shell requested but %s", reason)
+		return "", fmt.Errorf("mosh shell requested but %s", reason)
 	}
 	return "ssh", nil
 }
@@ -750,44 +773,29 @@ func (a *App) doctorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		checks := diagnostics.Local(cmd.Context(), p.Sync, p.Host.ShellTransport)
-		if p.HostID != "" {
+		checks, complete, cause := collectLocalDoctor(cmd.Context(), p.Sync, p.Host.ShellTransport, defaultDoctorTimeouts)
+		if p.HostID != "" && cause == nil {
+			recipe, explanations, recipeErr := resolveDoctorRecipe(p.Host.BootstrapProfile, p.Config.Global.BootstrapProfiles)
 			client := transport.New(p.Host.Destination, "")
-			var agentErr error
-			if asset, assetErr := transport.FindAgentAsset(p.Config.AgentPath); assetErr == nil {
-				if remote, deployErr := client.DeployAgent(cmd.Context(), asset); deployErr == nil {
-					client.AgentPath = remote
-				} else {
-					agentErr = deployErr
-				}
-			} else {
-				agentErr = assetErr
-			}
-			checks = append(checks, diagnostics.Remote(cmd.Context(), client, configuredContainerEngine(p.Config), p.Config.Global.Terminal.Scope != "remote", p.Host.ShellTransport)...)
-			if agentErr != nil {
-				checks = append(checks, diagnostics.Check{Name: "diagnostic-agent", OK: false, Detail: agentErr.Error(), Remediation: "run make build or reinstall pwnbridge"})
+			remoteChecks, remoteComplete, remoteCause := collectRemoteDoctor(cmd.Context(), client, remoteDoctorOptions{
+				Recipe: recipe, RecipeExplanations: explanations, RecipeError: recipeErr,
+				ContainerEngine: configuredContainerEngine(p.Config), ShellTransport: p.Host.ShellTransport,
+				RequireForwarding: p.Config.Global.Terminal.Scope != "remote", Timeouts: defaultDoctorTimeouts,
+			})
+			checks = append(checks, remoteChecks...)
+			complete = complete && remoteComplete
+			if remoteCause != nil {
+				cause = remoteCause
 			}
 		}
-		if asJSON {
-			if err := writeJSON(a.Out, map[string]any{"ok": diagnostics.Healthy(checks), "checks": checks}); err != nil {
-				return err
-			}
-			if !diagnostics.Healthy(checks) {
-				return errors.New("one or more doctor checks failed")
-			}
-			return nil
+		report := diagnostics.NewReport(checks, complete)
+		if err := a.emitDoctor(report, asJSON); err != nil {
+			return err
 		}
-		for _, check := range checks {
-			mark := "ok"
-			if !check.OK {
-				mark = "FAIL"
-			}
-			fmt.Fprintf(a.Out, "%-5s %-20s %s\n", mark, check.Name, check.Detail)
-			if !check.OK && check.Remediation != "" {
-				fmt.Fprintln(a.Out, "      fix:", check.Remediation)
-			}
+		if cause != nil {
+			return cause
 		}
-		if !diagnostics.Healthy(checks) {
+		if !report.OK {
 			return errors.New("one or more doctor checks failed")
 		}
 		return nil
@@ -835,18 +843,36 @@ func (a *App) cleanCommand() *cobra.Command {
 		}
 		if remote {
 			remotePath := remoteShellPath(p.WS.RemotePath)
-			out, err := sshCommand(cmd.Context(), "-T", p.Host.Destination, "rm -rf -- "+remotePath).CombinedOutput()
+			_, err := transport.New(p.Host.Destination, "").Raw(cmd.Context(), "rm -rf -- "+remotePath)
 			if err != nil {
-				return fmt.Errorf("remove remote workspace: %w: %s", err, strings.TrimSpace(string(out)))
+				return fmt.Errorf("remove remote workspace: %w", err)
 			}
 		}
-		_ = os.Remove(p.WS.StatePath)
+		if err := saveCleanedWorkspace(p, remote); err != nil {
+			return fmt.Errorf("save cleaned workspace catalog: %w", err)
+		}
 		fmt.Fprintln(a.Out, "cleaned workspace metadata; local files were preserved")
 		return nil
 	}}
 	cmd.Flags().BoolVar(&remote, "remote", false, "also delete the remote workspace")
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm destructive remote deletion")
 	return cmd
+}
+
+func saveCleanedWorkspace(p *projectContext, remoteRemoved bool) error {
+	p.State.MutagenIdentifier, p.State.SyncFingerprint, p.State.RuntimeID = "", "", ""
+	if remoteRemoved {
+		p.State.RemoteRetained = false
+	}
+	err := p.Manager.SaveState(p.WS, p.State)
+	if err == nil || !remoteRemoved {
+		return err
+	}
+	// A durability error can occur after the atomic rename, making the visible
+	// state uncertain. Restore the conservative retained marker before returning
+	// so a later host removal cannot assume remote lifecycle is complete.
+	p.State.RemoteRetained = true
+	return errors.Join(err, p.Manager.SaveState(p.WS, p.State))
 }
 
 func (a *App) hostCommand() *cobra.Command {
@@ -858,23 +884,21 @@ func (a *App) hostCommand() *cobra.Command {
 func (a *App) hostTransport() *cobra.Command {
 	var moshPort string
 	cmd := &cobra.Command{Use: "transport NAME auto|mosh|ssh", Short: "Set a host's interactive shell transport", Long: "Set a host's interactive shell transport. auto uses pwnbridge predictive echo over inline SSH, ssh disables prediction, and mosh explicitly selects a roaming full-screen Mosh session.", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := a.loadProject(cmd.Context(), false)
+		var host config.Host
+		_, err := a.updateGlobal(cmd.Context(), func(effective *config.Effective) error {
+			var ok bool
+			host, ok = effective.Global.Hosts[args[0]]
+			if !ok {
+				return fmt.Errorf("unknown host %q", args[0])
+			}
+			host.ShellTransport = args[1]
+			if cmd.Flags().Changed("mosh-port") {
+				host.MoshPort = moshPort
+			}
+			effective.Global.Hosts[args[0]] = host
+			return nil
+		})
 		if err != nil {
-			return err
-		}
-		host, ok := p.Config.Global.Hosts[args[0]]
-		if !ok {
-			return fmt.Errorf("unknown host %q", args[0])
-		}
-		host.ShellTransport = args[1]
-		if cmd.Flags().Changed("mosh-port") {
-			host.MoshPort = moshPort
-		}
-		p.Config.Global.Hosts[args[0]] = host
-		if err := p.Config.Validate(); err != nil {
-			return err
-		}
-		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
 			return err
 		}
 		port := host.MoshPort
@@ -896,36 +920,16 @@ func (a *App) hostTransport() *cobra.Command {
 }
 
 func (a *App) hostAdd() *cobra.Command {
-	var shellTransport, moshPort string
-	cmd := &cobra.Command{Use: "add NAME DESTINATION", Short: "Register or replace a remote host", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
-		e, err := a.loadProject(cmd.Context(), false)
-		if err != nil {
-			return err
-		}
-		name := args[0]
-		if !config.ValidHostName(name) {
-			return errors.New("host name must be 1-64 ASCII letters, digits, '.', '_', or '-'")
-		}
-		e.Config.Global.Hosts[name] = config.Host{Destination: args[1], Platform: "linux/amd64", WorkspaceRoot: "~/.local/share/pwnbridge/workspaces", BootstrapProfile: "pwn", ShellTransport: shellTransport, MoshPort: moshPort}
-		if e.Config.Global.DefaultHost == "" {
-			e.Config.Global.DefaultHost = name
-		}
-		// Validate the complete post-mutation configuration before writing it. In
-		// particular, this rejects OpenSSH option injection in DESTINATION and
-		// ensures host add can never persist a config that the next command cannot
-		// load.
-		e.Config.SelectedHost = e.Config.Global.DefaultHost
-		if err := e.Config.Validate(); err != nil {
-			return err
-		}
-		if err := config.SaveGlobal(e.Config.GlobalPath, e.Config.Global); err != nil {
-			return err
-		}
-		fmt.Fprintf(a.Out, "added host %s (%s)\n", name, args[1])
-		return nil
+	var options hostAddOptions
+	cmd := &cobra.Command{Use: "add NAME DESTINATION", Short: "Register a remote host", Long: "Register a remote host. Use --check to verify read-only SSH and bootstrap readiness before saving, and --replace to explicitly replace an existing name.", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+		return a.addHost(cmd.Context(), args[0], args[1], options)
 	}}
-	cmd.Flags().StringVar(&shellTransport, "shell-transport", "auto", "interactive shell: auto (predictive SSH), ssh (plain), or mosh (roaming)")
-	cmd.Flags().StringVar(&moshPort, "mosh-port", "60000:61000", "remote UDP port or range for Mosh")
+	cmd.Flags().StringVar(&options.ShellTransport, "shell-transport", "auto", "interactive shell: auto (predictive SSH), ssh (plain), or mosh (roaming)")
+	cmd.Flags().StringVar(&options.MoshPort, "mosh-port", "60000:61000", "remote UDP port or range for Mosh")
+	cmd.Flags().BoolVar(&options.Check, "check", false, "verify read-only SSH and bootstrap readiness before saving")
+	cmd.Flags().BoolVar(&options.Replace, "replace", false, "replace an existing host with the same name")
+	cmd.Flags().BoolVar(&options.Default, "default", false, "make this the machine-wide default host")
+	cmd.Flags().BoolVar(&options.JSON, "json", false, "emit JSON")
 	return cmd
 }
 
@@ -991,19 +995,14 @@ func (a *App) hostShow() *cobra.Command {
 
 func (a *App) hostDefault() *cobra.Command {
 	return &cobra.Command{Use: "default NAME", Short: "Set the machine-wide default host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := a.loadProject(cmd.Context(), false)
+		_, err := a.updateGlobal(cmd.Context(), func(effective *config.Effective) error {
+			if _, ok := effective.Global.Hosts[args[0]]; !ok {
+				return fmt.Errorf("unknown host %q", args[0])
+			}
+			effective.Global.DefaultHost = args[0]
+			return nil
+		})
 		if err != nil {
-			return err
-		}
-		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
-			return fmt.Errorf("unknown host %q", args[0])
-		}
-		p.Config.Global.DefaultHost = args[0]
-		p.Config.SelectedHost = args[0]
-		if err := p.Config.Validate(); err != nil {
-			return err
-		}
-		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Out, "default host is now %s\n", args[0])
@@ -1039,7 +1038,21 @@ func (a *App) hostUse() *cobra.Command {
 		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
+		hostLock, err := workspace.AcquireLock(a.hostLifecycleLockPath(args[0]))
+		if err != nil {
+			return err
+		}
+		latest, loadErr := config.LoadGlobal(a.Paths)
+		if loadErr != nil {
+			return errors.Join(loadErr, hostLock.Close())
+		}
+		if _, ok := latest.Global.Hosts[args[0]]; !ok {
+			return errors.Join(fmt.Errorf("host %q was removed; retry with current configuration", args[0]), hostLock.Close())
+		}
 		if err := p.Manager.SetBinding(p.Config.ProjectRoot, args[0]); err != nil {
+			return errors.Join(err, hostLock.Close())
+		}
+		if err := hostLock.Close(); err != nil {
 			return err
 		}
 		fmt.Fprintf(a.Out, "project %s now uses host %s\n", p.Config.ProjectRoot, args[0])
@@ -1047,31 +1060,6 @@ func (a *App) hostUse() *cobra.Command {
 	}}
 	cmd.Flags().BoolVar(&followDefault, "default", false, "remove the project override and follow the machine default")
 	return cmd
-}
-
-func (a *App) hostRemove() *cobra.Command {
-	return &cobra.Command{Use: "remove NAME", Short: "Remove a configured host", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		p, err := a.loadProject(cmd.Context(), false)
-		if err != nil {
-			return err
-		}
-		if _, ok := p.Config.Global.Hosts[args[0]]; !ok {
-			return fmt.Errorf("unknown host %q", args[0])
-		}
-		delete(p.Config.Global.Hosts, args[0])
-		if p.Config.Global.DefaultHost == args[0] {
-			p.Config.Global.DefaultHost = ""
-		}
-		if err := config.SaveGlobal(p.Config.GlobalPath, p.Config.Global); err != nil {
-			return err
-		}
-		if bound, err := p.Manager.Binding(p.Config.ProjectRoot); err != nil {
-			return err
-		} else if bound == args[0] {
-			return p.Manager.SetBinding(p.Config.ProjectRoot, "")
-		}
-		return nil
-	}}
 }
 
 func (a *App) hostDoctor() *cobra.Command {
@@ -1086,43 +1074,20 @@ func (a *App) hostDoctor() *cobra.Command {
 			return fmt.Errorf("unknown host %q", args[0])
 		}
 		client := transport.New(host.Destination, "")
-		inventory, err := bootstrap.Inspect(cmd.Context(), client)
-		if err != nil {
+		recipe, explanations, recipeErr := resolveDoctorRecipe(host.BootstrapProfile, effective.Global.BootstrapProfiles)
+		checks, complete, cause := collectRemoteDoctor(cmd.Context(), client, remoteDoctorOptions{
+			Recipe: recipe, RecipeExplanations: explanations, RecipeError: recipeErr,
+			ContainerEngine: configuredContainerEngine(effective), ShellTransport: host.ShellTransport,
+			RequireForwarding: effective.Global.Terminal.Scope != "remote", Timeouts: defaultDoctorTimeouts,
+		})
+		report := diagnostics.NewReport(checks, complete)
+		if err := a.emitDoctor(report, asJSON); err != nil {
 			return err
 		}
-		profile := host.BootstrapProfile
-		if profile == "" {
-			profile = "pwn"
+		if cause != nil {
+			return cause
 		}
-		value, err := resolveBootstrapRecipe(profile, effective.Global.BootstrapProfiles)
-		if err != nil {
-			return err
-		}
-		value, explanations, err := bootstrap.ResolveRecipe(value, nil, nil, nil, nil)
-		if err != nil {
-			return err
-		}
-		plan, err := bootstrap.BuildPlan(inventory, value, explanations, bootstrap.PlanOptions{AcceptDockerRootRisk: true})
-		if err != nil {
-			return err
-		}
-		checks := diagnostics.Bootstrap(inventory, plan)
-		if asJSON {
-			if err := writeJSON(a.Out, map[string]any{"ok": diagnostics.Healthy(checks), "checks": checks}); err != nil {
-				return err
-			}
-			if !diagnostics.Healthy(checks) {
-				return errors.New("host doctor failed")
-			}
-			return nil
-		}
-		for _, check := range checks {
-			fmt.Fprintf(a.Out, "%t %-20s %s\n", check.OK, check.Name, check.Detail)
-			if !check.OK && check.Remediation != "" {
-				fmt.Fprintln(a.Out, "      fix:", check.Remediation)
-			}
-		}
-		if !diagnostics.Healthy(checks) {
+		if !report.OK {
 			return errors.New("host doctor failed")
 		}
 		return nil
@@ -1135,6 +1100,7 @@ func (a *App) hostBootstrap() *cobra.Command {
 	var options bootstrap.Options
 	var profile, recipeFile, saveProfile, interactive string
 	var with, without, systemPackages, pipPackages []string
+	var bindHostProfile bool
 	cmd := &cobra.Command{Use: "bootstrap NAME", Short: "Prepare a remote host for pwn work", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if options.JSON {
 			interactive = "never"
@@ -1205,8 +1171,7 @@ func (a *App) hostBootstrap() *cobra.Command {
 				saveProfile = wizard.SaveName
 			}
 			if wizard.BindHost {
-				host.BootstrapProfile = wizard.SaveName
-				effective.Global.Hosts[args[0]] = host
+				bindHostProfile = true
 			}
 		} else if !options.Yes && !options.DryRun {
 			preview, planErr := bootstrap.BuildPlan(inventory, value, explanations, bootstrap.PlanOptions{NoSudo: options.NoSudo, AcceptDockerRootRisk: options.AcceptDockerRootRisk})
@@ -1234,14 +1199,22 @@ func (a *App) hostBootstrap() *cobra.Command {
 			if err := bootstrap.ValidateRecipe(value); err != nil {
 				return err
 			}
-			if effective.Global.BootstrapProfiles == nil {
-				effective.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
-			}
-			effective.Global.BootstrapProfiles[saveProfile] = value
-			if err := effective.Validate(); err != nil {
-				return err
-			}
-			if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
+			_, err := a.updateGlobal(cmd.Context(), func(latest *config.Effective) error {
+				if latest.Global.BootstrapProfiles == nil {
+					latest.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
+				}
+				latest.Global.BootstrapProfiles[saveProfile] = value
+				if bindHostProfile {
+					latestHost, ok := latest.Global.Hosts[args[0]]
+					if !ok {
+						return fmt.Errorf("host %q was removed while bootstrap was running", args[0])
+					}
+					latestHost.BootstrapProfile = saveProfile
+					latest.Global.Hosts[args[0]] = latestHost
+				}
+				return nil
+			})
+			if err != nil {
 				return err
 			}
 		}
@@ -1419,7 +1392,7 @@ func (a *App) syncCommand() *cobra.Command {
 		return nil
 	}}
 	conflicts.Flags().BoolVar(&conflictsJSON, "json", false, "emit JSON")
-	syncCmd.AddCommand(conflicts, a.resolveCommand())
+	syncCmd.AddCommand(conflicts, a.conflictDiffCommand(), a.resolveCommand(), a.recoveryCommand())
 	return syncCmd
 }
 
@@ -1433,66 +1406,75 @@ func (a *App) resolveCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		report, err := p.Sync.Status(cmd.Context(), p.State.MutagenIdentifier)
+		// Fail invalid or stale requests before paying the cost of establishing an
+		// SSH control master. The status is read again under the mutation lock.
+		preflight, err := p.Sync.Status(cmd.Context(), p.State.MutagenIdentifier)
 		if err != nil {
 			return err
 		}
-		if report.Healthy {
+		if preflight.Healthy {
 			return errors.New("sync session has no conflicts")
 		}
-		conflicts := map[string]bool{}
-		for _, path := range syncer.ConflictPaths(report.Raw) {
-			conflicts[filepath.Clean(path)] = true
+		if _, err := validateConflictArguments(preflight.Raw, args); err != nil {
+			return err
 		}
-		if len(conflicts) == 0 {
-			return errors.New("session is unhealthy but contains no resolvable file conflict")
-		}
-		timestamp := time.Now().UTC().Format("20060102T150405Z")
-		resolved := map[string]bool{}
-		for _, value := range args {
-			rel := filepath.Clean(value)
-			if filepath.IsAbs(rel) || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return fmt.Errorf("path %q escapes workspace", value)
-			}
-			if !conflicts[rel] {
-				return fmt.Errorf("path %q is not a current synchronization conflict", value)
-			}
-			if resolved[rel] {
-				return fmt.Errorf("path %q was specified more than once", value)
-			}
-			resolved[rel] = true
-			if err := rejectSymlinkParents(p.WS.LocalRoot, rel); err != nil {
-				return fmt.Errorf("unsafe local conflict path %q: %w", value, err)
-			}
-			if output, checkErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, remoteSymlinkParentCheck(p.WS.RemotePath, rel)).CombinedOutput(); checkErr != nil {
-				return fmt.Errorf("unsafe remote conflict path %q: %w: %s", value, checkErr, strings.TrimSpace(string(output)))
-			}
-			backup := filepath.Join(p.WS.RecoveryPath, timestamp, prefer+"-winner", rel)
-			if err := os.MkdirAll(filepath.Dir(backup), 0o700); err != nil {
+		var remoteRecovery *transport.Master
+		if prefer == "local" {
+			var cleanup func()
+			remoteRecovery, cleanup, err = a.startAgentControl(cmd.Context(), p, "recovery")
+			if err != nil {
 				return err
 			}
-			local := filepath.Join(p.WS.LocalRoot, rel)
-			remote := strings.TrimRight(p.WS.RemotePath, "/") + "/" + filepath.ToSlash(rel)
-			if prefer == "remote" {
-				if err := copyPath(local, backup); err != nil {
-					return fmt.Errorf("back up local loser: %w", err)
+			defer cleanup()
+		}
+		mutationErr := func() (result error) {
+			lock, err := workspace.AcquireLock(p.WS.LockPath)
+			if err != nil {
+				return err
+			}
+			defer func() { result = errors.Join(result, lock.Close()) }()
+			report, err := p.Sync.Status(cmd.Context(), p.State.MutagenIdentifier)
+			if err != nil {
+				return err
+			}
+			if report.Healthy {
+				return errors.New("sync session has no conflicts")
+			}
+			paths, err := validateConflictArguments(report.Raw, args)
+			if err != nil {
+				return err
+			}
+			archive := recovery.ArchiveName(time.Now())
+			for _, rel := range paths {
+				if err := rejectSymlinkParents(p.WS.LocalRoot, rel); err != nil {
+					return fmt.Errorf("unsafe local conflict path %q: %w", rel, err)
 				}
-				if err := os.RemoveAll(local); err != nil {
+				backupID, err := recovery.BackupID(archive, prefer, rel)
+				if err != nil {
 					return err
 				}
-			} else {
-				copyCommand := exec.CommandContext(cmd.Context(), "scp", "-q", "-r", "-p", "--", p.Host.Destination+":"+remote, backup)
-				copyCommand.Env = transport.SafeSSHEnvironment()
-				out, copyErr := copyCommand.CombinedOutput()
-				if copyErr != nil {
-					return fmt.Errorf("back up remote loser: %w: %s", copyErr, strings.TrimSpace(string(out)))
+				backup := filepath.Join(p.WS.RecoveryPath, backupID)
+				if prefer == "remote" {
+					if err := recovery.Copy(p.WS.LocalRoot, rel, p.WS.RecoveryPath, backupID); err != nil {
+						return fmt.Errorf("back up local loser: %w", err)
+					}
+					if _, err := recovery.Record(p.WS.RecoveryPath, archive, prefer, rel); err != nil {
+						return fmt.Errorf("record local recovery copy: %w", err)
+					}
+					if err := recovery.RemoveAll(p.WS.LocalRoot, rel); err != nil {
+						return fmt.Errorf("remove local loser: %w", err)
+					}
+				} else {
+					if _, err := backupRemoteLoser(cmd.Context(), remoteRecovery, p.WS.RemotePath, rel, p.WS.RecoveryPath, archive, backupID); err != nil {
+						return fmt.Errorf("back up and remove remote loser: %w", err)
+					}
 				}
-				out, removeErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, "rm -rf -- "+remoteShellPath(remote)).CombinedOutput()
-				if removeErr != nil {
-					return fmt.Errorf("remove remote loser: %w: %s", removeErr, strings.TrimSpace(string(out)))
-				}
+				fmt.Fprintf(a.Out, "backed up losing %s copy of %q to %q\n", opposite(prefer), rel, backup)
 			}
-			fmt.Fprintf(a.Out, "backed up losing %s copy of %s to %s\n", opposite(prefer), rel, backup)
+			return nil
+		}()
+		if mutationErr != nil {
+			return mutationErr
 		}
 		return a.barrier(cmd.Context(), p)
 	}}
@@ -1582,12 +1564,13 @@ func (a *App) runtimeCommand() *cobra.Command {
 		if err := a.stopActiveSessions(cmd.Context(), p.WS.LocalRoot, p.Config.Global.Sync.BarrierTimeout+30*time.Second); err != nil {
 			return err
 		}
+		client := transport.New(p.Host.Destination, "")
 		engine := p.Config.Project.Runtime.Container.Engine
 		if engine == "" || engine == "auto" {
 			probe := `if command -v podman >/dev/null 2>&1; then printf podman; elif command -v docker >/dev/null 2>&1; then printf docker; else exit 127; fi`
-			out, probeErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, probe).CombinedOutput()
+			out, probeErr := client.Raw(cmd.Context(), probe)
 			if probeErr != nil {
-				return fmt.Errorf("detect remote container engine: %w: %s", probeErr, strings.TrimSpace(string(out)))
+				return fmt.Errorf("detect remote container engine: %w", probeErr)
 			}
 			engine = strings.TrimSpace(string(out))
 		}
@@ -1597,9 +1580,9 @@ func (a *App) runtimeCommand() *cobra.Command {
 		label := "pwnbridge.workspace=" + p.WS.ID
 		command := "ids=$(" + engine + " ps -aq --filter label=" + remoteShellPath(label) + "); " +
 			"if [ -n \"$ids\" ]; then " + engine + " rm -f $ids; fi"
-		out, runErr := sshCommand(cmd.Context(), "-T", p.Host.Destination, command).CombinedOutput()
+		_, runErr := client.Raw(cmd.Context(), command)
 		if runErr != nil {
-			return fmt.Errorf("reset runtime: %w: %s", runErr, strings.TrimSpace(string(out)))
+			return fmt.Errorf("reset runtime: %w", runErr)
 		}
 		fmt.Fprintln(a.Out, "removed pwnbridge containers; workspace preserved")
 		return nil
@@ -1697,7 +1680,7 @@ func (a *App) bootstrapConfigCommand() *cobra.Command {
 	root.AddCommand(show)
 	var importName string
 	var replace bool
-	importCmd := &cobra.Command{Use: "import FILE", Short: "Import a portable recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+	importCmd := &cobra.Command{Use: "import FILE", Short: "Import a portable recipe", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		value, err := bootstrap.LoadRecipe(args[0])
 		if err != nil {
 			return err
@@ -1711,21 +1694,17 @@ func (a *App) bootstrapConfigCommand() *cobra.Command {
 		if err := bootstrap.ValidateRecipe(value); err != nil {
 			return err
 		}
-		effective, err := config.LoadGlobal(a.Paths)
+		_, err = a.updateGlobal(cmd.Context(), func(effective *config.Effective) error {
+			if _, exists := effective.Global.BootstrapProfiles[value.Name]; exists && !replace {
+				return fmt.Errorf("bootstrap recipe %q already exists; pass --replace", value.Name)
+			}
+			if effective.Global.BootstrapProfiles == nil {
+				effective.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
+			}
+			effective.Global.BootstrapProfiles[value.Name] = value
+			return nil
+		})
 		if err != nil {
-			return err
-		}
-		if _, exists := effective.Global.BootstrapProfiles[value.Name]; exists && !replace {
-			return fmt.Errorf("bootstrap recipe %q already exists; pass --replace", value.Name)
-		}
-		if effective.Global.BootstrapProfiles == nil {
-			effective.Global.BootstrapProfiles = map[string]bootstrap.Recipe{}
-		}
-		effective.Global.BootstrapProfiles[value.Name] = value
-		if err := effective.Validate(); err != nil {
-			return err
-		}
-		if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
 			return err
 		}
 		fmt.Fprintln(a.Out, "imported bootstrap recipe "+value.Name)
@@ -1756,32 +1735,28 @@ func (a *App) bootstrapConfigCommand() *cobra.Command {
 	}}
 	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "-", "output file or - for stdout")
 	root.AddCommand(exportCmd)
-	root.AddCommand(&cobra.Command{Use: "remove NAME", Short: "Remove a saved bootstrap recipe", Args: cobra.ExactArgs(1), RunE: func(_ *cobra.Command, args []string) error {
+	root.AddCommand(&cobra.Command{Use: "remove NAME", Short: "Remove a saved bootstrap recipe", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if args[0] == "pwn" || args[0] == "minimal" {
 			return errors.New("cannot remove a built-in bootstrap recipe")
 		}
-		effective, err := config.LoadGlobal(a.Paths)
-		if err != nil {
-			return err
-		}
-		if _, exists := effective.Global.BootstrapProfiles[args[0]]; !exists {
-			return fmt.Errorf("unknown saved bootstrap recipe %q", args[0])
-		}
-		var bound []string
-		for name, host := range effective.Global.Hosts {
-			if host.BootstrapProfile == args[0] {
-				bound = append(bound, name)
+		_, err := a.updateGlobal(cmd.Context(), func(effective *config.Effective) error {
+			if _, exists := effective.Global.BootstrapProfiles[args[0]]; !exists {
+				return fmt.Errorf("unknown saved bootstrap recipe %q", args[0])
 			}
-		}
-		sort.Strings(bound)
-		if len(bound) > 0 {
-			return fmt.Errorf("bootstrap recipe %q is bound to hosts %s; rebind them before removal", args[0], strings.Join(bound, ", "))
-		}
-		delete(effective.Global.BootstrapProfiles, args[0])
-		if err := effective.Validate(); err != nil {
-			return err
-		}
-		if err := config.SaveGlobal(effective.GlobalPath, effective.Global); err != nil {
+			var bound []string
+			for name, host := range effective.Global.Hosts {
+				if host.BootstrapProfile == args[0] {
+					bound = append(bound, name)
+				}
+			}
+			sort.Strings(bound)
+			if len(bound) > 0 {
+				return fmt.Errorf("bootstrap recipe %q is bound to hosts %s; rebind them before removal", args[0], strings.Join(bound, ", "))
+			}
+			delete(effective.Global.BootstrapProfiles, args[0])
+			return nil
+		})
+		if err != nil {
 			return err
 		}
 		fmt.Fprintln(a.Out, "removed bootstrap recipe "+args[0])
@@ -2077,21 +2052,13 @@ func removeInvalidStaleSession(path string) (bool, error) {
 }
 
 func projectIgnores(root string, configured []string) ([]string, error) {
-	file, err := os.Open(filepath.Join(root, ".pwnbridgeignore"))
+	const maximumIgnoreBytes = 1 << 20
+	data, err := fsutil.ReadFileLimit(filepath.Join(root, ".pwnbridgeignore"), maximumIgnoreBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return parseIgnores(nil, configured)
 	}
 	if err != nil {
 		return nil, err
-	}
-	defer file.Close()
-	const maximumIgnoreBytes = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(file, maximumIgnoreBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maximumIgnoreBytes {
-		return nil, errors.New(".pwnbridgeignore exceeds 1 MiB")
 	}
 	return parseIgnores(data, configured)
 }
@@ -2178,12 +2145,6 @@ func remoteShellPath(value string) string {
 }
 func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
 
-func sshCommand(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Env = transport.SafeSSHEnvironment()
-	return cmd
-}
-
 func rejectSymlinkParents(root, rel string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
@@ -2234,69 +2195,6 @@ func remoteSymlinkParentCheck(root, rel string) string {
 				"if test -e "+quoted+" && test ! -d "+quoted+"; then printf 'non-directory parent\\n'; exit 41; fi")
 	}
 	return "set -eu; " + strings.Join(checks, "; ")
-}
-
-func copyPath(source, destination string) error {
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return copySymlink(source, destination)
-	}
-	if info.IsDir() {
-		return filepath.Walk(source, func(path string, entry os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				return walkErr
-			}
-			rel, _ := filepath.Rel(source, path)
-			target := filepath.Join(destination, rel)
-			if entry.IsDir() {
-				return os.MkdirAll(target, entry.Mode().Perm())
-			}
-			if entry.Mode()&os.ModeSymlink != 0 {
-				return copySymlink(path, target)
-			}
-			if !entry.Mode().IsRegular() {
-				return fmt.Errorf("refuse to back up non-regular file %s", path)
-			}
-			return copyFile(path, target, entry.Mode().Perm())
-		})
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("refuse to back up non-regular file %s", source)
-	}
-	return copyFile(source, destination, info.Mode().Perm())
-}
-
-func copySymlink(source, destination string) error {
-	target, err := os.Readlink(source)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	return os.Symlink(target, destination)
-}
-func copyFile(source, destination string, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return err
-	}
-	in, err := os.Open(source)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func EncodeRuntime(spec protocol.RuntimeSpec) string {

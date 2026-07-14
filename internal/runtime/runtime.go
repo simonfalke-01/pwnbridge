@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 )
+
+const maxRuntimeCommandOutputBytes = 64 << 10
 
 type State struct {
 	Kind    string `json:"kind"`
@@ -21,6 +26,15 @@ type State struct {
 }
 
 func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (State, error) {
+	return EnsureProgress(ctx, spec, sessionID, nil)
+}
+
+// EnsureProgress is Ensure with optional direct image-pull progress. Progress
+// is an opaque stream and is never used for command responses or diagnostics.
+func EnsureProgress(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string, progress io.Writer) (State, error) {
+	if err := ctx.Err(); err != nil {
+		return State{}, err
+	}
 	if spec.Kind == "" || spec.Kind == "host" {
 		spec.Kind = "host"
 		return State{Kind: "host", Running: true}, nil
@@ -43,12 +57,24 @@ func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (
 		name = "pwnbridge-" + sanitizeID(name)
 	}
 	spec.Engine, spec.ID = engine, name
-	inspect := exec.CommandContext(ctx, engine, "inspect", "-f", "{{.State.Running}}", name)
-	if out, err := inspect.Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
+	inspect := subprocess.CommandContext(ctx, engine, "inspect", "-f", "{{.State.Running}}", name)
+	inspectResult, inspectErr := subprocess.Capture(ctx, inspect, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
+	if inspectErr == nil && strings.TrimSpace(string(inspectResult.Stdout)) == "true" {
 		return State{Kind: "container", Engine: engine, ID: name, Running: true}, nil
 	}
-	_ = exec.CommandContext(ctx, engine, "rm", "-f", name).Run()
-	imageID, err := resolveImage(ctx, engine, spec.Image)
+	if err := ctx.Err(); err != nil {
+		return State{}, err
+	}
+	var limitErr *subprocess.OutputLimitError
+	if errors.As(inspectErr, &limitErr) {
+		return State{}, runtimeCommandError("inspect existing container", inspectResult, inspectErr)
+	}
+	var exitErr *exec.ExitError
+	if inspectErr != nil && !errors.As(inspectErr, &exitErr) {
+		return State{}, runtimeCommandError("inspect existing container", inspectResult, inspectErr)
+	}
+	_ = subprocess.CommandContext(ctx, engine, "rm", "-f", name).Run()
+	imageID, err := resolveImageProgress(ctx, engine, spec.Image, progress)
 	if err != nil {
 		return State{}, err
 	}
@@ -74,9 +100,10 @@ func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (
 		"-v", spec.Workspace+":/work", "-v", spec.SessionDir+":/run/pwnbridge",
 		"-v", filepath.Join(spec.SessionDir, "bin")+":/run/pwnbridge/bin:ro", "-w", workdir,
 		"-e", "HOME=/tmp/pwnbridge-home", imageID, "sh", "-c", "mkdir -p /tmp/pwnbridge-home && exec sleep infinity")
-	cmd := exec.CommandContext(ctx, engine, args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return State{}, fmt.Errorf("create container: %w: %s", err, strings.TrimSpace(string(out)))
+	cmd := subprocess.CommandContext(ctx, engine, args...)
+	result, err := subprocess.Capture(ctx, cmd, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
+	if err != nil {
+		return State{}, runtimeCommandError("create container", result, err)
 	}
 	return State{Kind: "container", Engine: engine, ID: name, Running: true}, nil
 }
@@ -86,12 +113,17 @@ func Ensure(ctx context.Context, spec *protocol.RuntimeSpec, sessionID string) (
 // containers are reused before this is called, so later debugger panes do not
 // depend on a tag still existing locally.
 func resolveImage(ctx context.Context, engine, reference string) (string, error) {
+	return resolveImageProgress(ctx, engine, reference, nil)
+}
+
+func resolveImageProgress(ctx context.Context, engine, reference string, progress io.Writer) (string, error) {
 	inspect := func() (string, error) {
-		out, err := exec.CommandContext(ctx, engine, "image", "inspect", "--format", "{{.Id}}", reference).CombinedOutput()
+		cmd := subprocess.CommandContext(ctx, engine, "image", "inspect", "--format", "{{.Id}}", reference)
+		result, err := subprocess.Capture(ctx, cmd, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
 		if err != nil {
-			return "", fmt.Errorf("inspect container image %q: %w: %s", reference, err, strings.TrimSpace(string(out)))
+			return "", runtimeCommandError(fmt.Sprintf("inspect container image %q", reference), result, err)
 		}
-		id := strings.TrimSpace(string(out))
+		id := strings.TrimSpace(string(result.Stdout))
 		hex := strings.TrimPrefix(id, "sha256:")
 		if len(hex) != 64 {
 			return "", fmt.Errorf("container engine returned a non-immutable image ID %q", id)
@@ -105,12 +137,54 @@ func resolveImage(ctx context.Context, engine, reference string) (string, error)
 	}
 	if id, err := inspect(); err == nil {
 		return id, nil
+	} else if ctx.Err() != nil {
+		return "", ctx.Err()
+	} else {
+		var limitErr *subprocess.OutputLimitError
+		if errors.As(err, &limitErr) {
+			return "", err
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			return "", err
+		}
 	}
-	pull := exec.CommandContext(ctx, engine, "pull", reference)
-	if out, err := pull.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("pull container image %q: %w: %s", reference, err, strings.TrimSpace(string(out)))
+	if progress != nil {
+		pull := subprocess.CommandContext(ctx, engine, "pull", reference)
+		writer := &lockedWriter{target: progress}
+		pull.Stdout, pull.Stderr = writer, writer
+		if err := pull.Run(); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return "", fmt.Errorf("pull container image %q: %w", reference, err)
+		}
+	} else {
+		pull := subprocess.CommandContext(ctx, engine, "pull", "--quiet", reference)
+		result, err := subprocess.Capture(ctx, pull, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
+		if err != nil {
+			return "", runtimeCommandError(fmt.Sprintf("pull container image %q", reference), result, err)
+		}
 	}
 	return inspect()
+}
+
+func runtimeCommandError(operation string, result subprocess.CaptureResult, err error) error {
+	if detail := result.Diagnostic(); detail != "" {
+		return fmt.Errorf("%s: %w: %s", operation, err, detail)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+type lockedWriter struct {
+	mu     sync.Mutex
+	target io.Writer
+}
+
+func (w *lockedWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.target.Write(data)
 }
 
 func Command(spec protocol.RuntimeSpec, tty bool, cwd string, environment map[string]string, argv []string) (*exec.Cmd, error) {
@@ -169,20 +243,38 @@ func lookPath(name, search string) (string, error) {
 }
 
 func Inspect(ctx context.Context, spec protocol.RuntimeSpec) (State, error) {
+	if err := ctx.Err(); err != nil {
+		return State{}, err
+	}
 	if spec.Kind == "" || spec.Kind == "host" {
 		return State{Kind: "host", Running: true}, nil
 	}
 	if spec.Engine == "" || spec.ID == "" {
 		return State{Kind: "container"}, nil
 	}
-	out, err := exec.CommandContext(ctx, spec.Engine, "inspect", "-f", "{{.State.Running}}", spec.ID).Output()
+	cmd := subprocess.CommandContext(ctx, spec.Engine, "inspect", "-f", "{{.State.Running}}", spec.ID)
+	result, err := subprocess.Capture(ctx, cmd, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
 	if err != nil {
-		return State{Kind: "container", Engine: spec.Engine, ID: spec.ID}, nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return State{}, ctxErr
+		}
+		var limitErr *subprocess.OutputLimitError
+		if errors.As(err, &limitErr) {
+			return State{}, runtimeCommandError("inspect container", result, err)
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return State{Kind: "container", Engine: spec.Engine, ID: spec.ID}, nil
+		}
+		return State{}, runtimeCommandError("inspect container", result, err)
 	}
-	return State{Kind: "container", Engine: spec.Engine, ID: spec.ID, Running: strings.TrimSpace(string(out)) == "true"}, nil
+	return State{Kind: "container", Engine: spec.Engine, ID: spec.ID, Running: strings.TrimSpace(string(result.Stdout)) == "true"}, nil
 }
 
 func Stop(ctx context.Context, spec protocol.RuntimeSpec) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if spec.Kind != "container" || spec.ID == "" {
 		return nil
 	}
@@ -190,15 +282,19 @@ func Stop(ctx context.Context, spec protocol.RuntimeSpec) error {
 	if detectErr != nil {
 		return detectErr
 	}
-	out, err := exec.CommandContext(ctx, engine, "rm", "-f", spec.ID).CombinedOutput()
+	cmd := subprocess.CommandContext(ctx, engine, "rm", "-f", spec.ID)
+	result, err := subprocess.Capture(ctx, cmd, maxRuntimeCommandOutputBytes, subprocess.DiagnosticLimit)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		// Podman can report a rootless network-namespace cleanup error after it
 		// has successfully removed the container.  Re-inspect before treating
 		// that diagnostic as a failed teardown.
-		if inspectErr := exec.CommandContext(ctx, engine, "inspect", spec.ID).Run(); inspectErr != nil {
+		if inspectErr := subprocess.CommandContext(ctx, engine, "inspect", spec.ID).Run(); inspectErr != nil {
 			return nil
 		}
-		return fmt.Errorf("remove container: %w: %s", err, strings.TrimSpace(string(out)))
+		return runtimeCommandError("remove container", result, err)
 	}
 	return nil
 }

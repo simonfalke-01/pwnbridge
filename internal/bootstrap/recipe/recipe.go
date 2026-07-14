@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 )
 
 const Schema = 1
@@ -47,7 +47,7 @@ func Parse(data []byte) (Recipe, error) {
 }
 
 func Load(path string) (Recipe, error) {
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFileLimit(path, maxRecipeBytes)
 	if err != nil {
 		return Recipe{}, fmt.Errorf("read bootstrap recipe: %w", err)
 	}

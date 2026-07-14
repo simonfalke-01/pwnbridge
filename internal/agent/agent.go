@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -21,11 +22,24 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/simonfalke-01/pwnbridge/internal/filesnapshot"
 	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/identity"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/recovery"
 	pruntime "github.com/simonfalke-01/pwnbridge/internal/runtime"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
+)
+
+const (
+	agentProbeCommandTimeout = 5 * time.Second
+	remotePaneOpenTimeout    = 5 * time.Second
+	remotePaneQueryTimeout   = time.Second
+	maxAgentCommandOutput    = 64 << 10
+	maxAgentPaneInventory    = 4 << 20
 )
 
 func Main(args []string) error {
@@ -53,9 +67,69 @@ func Main(args []string) error {
 		return cleanup(args[1:])
 	case "bootstrap":
 		return bootstrapCommand(args[1:])
+	case "snapshot":
+		return snapshotCommand(args[1:], os.Stdout)
+	case "recovery-stream":
+		return recoveryStreamCommand(args[1:], os.Stdin, os.Stdout)
 	default:
 		return fmt.Errorf("unknown agent command %q", args[0])
 	}
+}
+
+func recoveryStreamCommand(args []string, input io.Reader, output io.Writer) error {
+	var request protocol.RecoveryRequest
+	if err := decodeRequest(args, &request); err != nil {
+		return err
+	}
+	summary, observation, err := recovery.WriteArchive(expandHome(request.Root), request.Path, output)
+	if err != nil {
+		return err
+	}
+	var acknowledgement protocol.RecoveryAck
+	if err := decodeStreamControl(input, &acknowledgement); err != nil {
+		return fmt.Errorf("receive durable recovery acknowledgement: %w", err)
+	}
+	if !acknowledgement.Commit || acknowledgement.SHA256 != summary.SHA256 {
+		return errors.New("recovery acknowledgement does not match the streamed archive")
+	}
+	if err := recovery.VerifyAndRemove(expandHome(request.Root), request.Path, summary.SHA256, observation); err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(protocol.RecoveryResult{
+		SHA256: summary.SHA256, Size: summary.Size, Items: summary.Items, Removed: true,
+	})
+}
+
+func decodeStreamControl(input io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(input, protocol.MaxFrame+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > protocol.MaxFrame {
+		return errors.New("stream control frame exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("stream control frame contains trailing data")
+	}
+	return nil
+}
+
+func snapshotCommand(args []string, output io.Writer) error {
+	var request protocol.SnapshotRequest
+	if err := decodeRequest(args, &request); err != nil {
+		return err
+	}
+	root := expandHome(request.Root)
+	snapshot, err := filesnapshot.Capture(root, request.Path, protocol.MaxConflictPreviewBytes)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(output).Encode(snapshot)
 }
 
 func bootstrapCommand(args []string) error {
@@ -68,9 +142,11 @@ func bootstrapCommand(args []string) error {
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	emit := func(event protocol.BootstrapEvent) { _ = encoder.Encode(event) }
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer stop()
 	if request.AuthenticateSudo {
 		emit(protocol.BootstrapEvent{Type: "auth", Description: "Authenticate sudo in this terminal"})
-		cmd := exec.Command("sudo", "-v")
+		cmd := subprocess.CommandContext(ctx, "sudo", "-v")
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("sudo authentication: %w", err)
@@ -87,9 +163,9 @@ func bootstrapCommand(args []string) error {
 		var cmd *exec.Cmd
 		switch step.ID {
 		case "pwntools-venv":
-			cmd = exec.Command("sh", "-c", `envroot="$HOME/.local/share/pwnbridge/envs/pwn-v1"; if test ! -x "$envroot/bin/python" || test ! -x "$envroot/bin/pip"; then rm -rf "$envroot"; python3 -m venv --system-site-packages "$envroot"; fi`)
+			cmd = subprocess.CommandContext(ctx, "sh", "-c", `envroot="$HOME/.local/share/pwnbridge/envs/pwn-v1"; if test ! -x "$envroot/bin/python" || test ! -x "$envroot/bin/pip"; then rm -rf "$envroot"; python3 -m venv --system-site-packages "$envroot"; fi`)
 		case "pwndbg-install":
-			cmd = exec.Command("sh", "-c", agentPwndbgInstall)
+			cmd = subprocess.CommandContext(ctx, "sh", "-c", agentPwndbgInstall)
 		default:
 			if len(argv) == 0 {
 				return fmt.Errorf("bootstrap step %q has empty argv", step.ID)
@@ -97,7 +173,7 @@ func bootstrapCommand(args []string) error {
 			if step.Sudo {
 				argv = append([]string{"sudo", "-n"}, argv...)
 			}
-			cmd = exec.Command(argv[0], argv[1:]...)
+			cmd = subprocess.CommandContext(ctx, argv[0], argv[1:]...)
 		}
 		cmd.Stdin = os.Stdin
 		cmd.Env = bootstrapEnvironment(home, user, step.Environment)
@@ -222,7 +298,7 @@ func cleanup(args []string) error {
 	if filepath.Dir(filepath.Clean(dir)) != allowed || filepath.Base(filepath.Clean(dir)) != request.SessionID {
 		return errors.New("cleanup directory is outside pwnbridge session state")
 	}
-	if err := pruntime.Stop(context.Background(), request.Runtime); err != nil {
+	if err := stopRuntime(request.Runtime); err != nil {
 		return err
 	}
 	return os.RemoveAll(dir)
@@ -255,6 +331,8 @@ func brokerPing(args []string) error {
 }
 
 func probe() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*agentProbeCommandTimeout)
+	defer cancel()
 	home, _ := os.UserHomeDir()
 	tools := make(map[string]bool)
 	for _, tool := range []string{
@@ -266,7 +344,7 @@ func probe() error {
 		tools[tool] = err == nil
 	}
 	distro, distroVersion := osRelease()
-	disk, inodes := filesystemAvailability(home)
+	disk, inodes := filesystemAvailability(ctx, home)
 	homeWritable := false
 	if dir := filepath.Join(home, ".cache", "pwnbridge"); os.MkdirAll(dir, 0o700) == nil {
 		if file, err := os.CreateTemp(dir, ".probe-*"); err == nil {
@@ -276,12 +354,16 @@ func probe() error {
 			_ = os.Remove(name)
 		}
 	}
-	ptraceBytes, _ := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
+	ptraceBytes, _ := fsutil.ReadFileLimit("/proc/sys/kernel/yama/ptrace_scope", 64)
 	pwntoolsVersion := ""
 	pwnPython := filepath.Join(home, ".local", "share", "pwnbridge", "envs", "pwn-v1", "bin", "python")
-	if output, err := exec.Command(pwnPython, "-c", `import importlib.metadata as m; print(m.version("pwntools"))`).Output(); err == nil {
+	pwntoolsContext, cancelPwntools := context.WithTimeout(ctx, agentProbeCommandTimeout)
+	pwntoolsCommand := subprocess.CommandContext(pwntoolsContext, pwnPython, "-c", `import importlib.metadata as m; print(m.version("pwntools"))`)
+	if result, err := subprocess.Capture(pwntoolsContext, pwntoolsCommand, maxAgentCommandOutput, subprocess.DiagnosticLimit); err == nil {
+		output := result.Stdout
 		pwntoolsVersion = strings.TrimSpace(string(output))
 	}
+	cancelPwntools()
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
 		"protocol": version.ProtocolVersion, "version": version.Version,
 		"os": runtime.GOOS, "architecture": runtime.GOARCH, "home": home, "tools": tools,
@@ -292,7 +374,7 @@ func probe() error {
 }
 
 func osRelease() (string, string) {
-	data, err := os.ReadFile("/etc/os-release")
+	data, err := fsutil.ReadFileLimit("/etc/os-release", 64<<10)
 	if err != nil {
 		return "", ""
 	}
@@ -306,15 +388,19 @@ func osRelease() (string, string) {
 	return values["ID"], values["VERSION_ID"]
 }
 
-func filesystemAvailability(home string) (uint64, uint64) {
-	return dfAvailable("-Pk", home), dfAvailable("-Pi", home)
+func filesystemAvailability(ctx context.Context, home string) (uint64, uint64) {
+	return dfAvailable(ctx, "-Pk", home), dfAvailable(ctx, "-Pi", home)
 }
 
-func dfAvailable(option, path string) uint64 {
-	output, err := exec.Command("df", option, path).Output()
+func dfAvailable(ctx context.Context, option, path string) uint64 {
+	commandContext, cancel := context.WithTimeout(ctx, agentProbeCommandTimeout)
+	defer cancel()
+	command := subprocess.CommandContext(commandContext, "df", option, path)
+	result, err := subprocess.Capture(commandContext, command, maxAgentCommandOutput, subprocess.DiagnosticLimit)
 	if err != nil {
 		return 0
 	}
+	output := result.Stdout
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	if len(lines) < 2 {
 		return 0
@@ -325,6 +411,42 @@ func dfAvailable(option, path string) uint64 {
 	}
 	value, _ := strconv.ParseUint(fields[3], 10, 64)
 	return value
+}
+
+// ensureRuntime confines temporary signal interception to container setup. The
+// stop call restores the normal signal behavior before the agent replaces
+// itself with the requested command or shell.
+func ensureRuntime(spec *protocol.RuntimeSpec, sessionID string) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	_, err := pruntime.EnsureProgress(ctx, spec, sessionID, runtimeProgressWriter())
+	contextErr := ctx.Err()
+	stop()
+	if contextErr != nil {
+		return contextErr
+	}
+	return err
+}
+
+func stopRuntime(spec protocol.RuntimeSpec) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	err := pruntime.Stop(ctx, spec)
+	contextErr := ctx.Err()
+	stop()
+	if contextErr != nil {
+		return contextErr
+	}
+	return err
+}
+
+func runtimeProgressWriter() io.Writer {
+	return terminalProgressWriter(os.Stderr)
+}
+
+func terminalProgressWriter(file *os.File) io.Writer {
+	if term.IsTerminal(int(file.Fd())) {
+		return file
+	}
+	return nil
 }
 
 func execCommand(args []string) error {
@@ -363,7 +485,7 @@ func execCommand(args []string) error {
 			request.Environment["PATH"] = strings.Join(pathParts, ":")
 		}
 	}
-	if _, err := pruntime.Ensure(context.Background(), &request.Runtime, sessionName(request.Runtime)); err != nil {
+	if err := ensureRuntime(&request.Runtime, sessionName(request.Runtime)); err != nil {
 		return err
 	}
 	if request.Runtime.SessionDir != "" {
@@ -422,7 +544,7 @@ func shellCommand(args []string) error {
 		return err
 	}
 	request.Runtime.Workspace = request.Cwd
-	if _, err := pruntime.Ensure(context.Background(), &request.Runtime, request.SessionID); err != nil {
+	if err := ensureRuntime(&request.Runtime, request.SessionID); err != nil {
 		return err
 	}
 	_ = fsutil.WriteJSON(filepath.Join(sessionDir, "runtime.json"), request.Runtime)
@@ -498,7 +620,7 @@ func paneCommand(args []string) error {
 	}
 	manifestPath := filepath.Join(request.SessionDir, "requests", request.RequestID+".json")
 	var manifest protocol.Manifest
-	if err := fsutil.ReadJSONLimit(manifestPath, protocol.MaxFrame, &manifest); err != nil {
+	if err := fsutil.ReadPrivateJSONLimit(manifestPath, protocol.MaxFrame, &manifest); err != nil {
 		return fmt.Errorf("read debugger manifest: %w", err)
 	}
 	if manifest.Protocol != version.ProtocolVersion || manifest.SessionID != request.SessionID || manifest.RequestID != request.RequestID {
@@ -519,7 +641,7 @@ func paneCommand(args []string) error {
 	environment := filteredEnvironment(environEntries)
 	request.Runtime.Workspace = expandHome(request.Runtime.Workspace)
 	request.Runtime.SessionDir = expandHome(request.Runtime.SessionDir)
-	if _, err := pruntime.Ensure(context.Background(), &request.Runtime, request.SessionID); err != nil {
+	if err := ensureRuntime(&request.Runtime, request.SessionID); err != nil {
 		return err
 	}
 	cmd, err := pruntime.Command(request.Runtime, true, expandHome(string(cwdBytes)), environment, argv)
@@ -604,7 +726,13 @@ func terminalWrapper(args []string) error {
 		case "opened":
 			continue
 		case "exited":
-			payload, _ := protocol.ParsePayload[protocol.ExitPayload](message)
+			if len(message.Payload) == 0 {
+				return errors.New("broker exit response has no payload")
+			}
+			payload, err := protocol.ParsePayload[protocol.ExitPayload](message)
+			if err != nil {
+				return fmt.Errorf("decode broker exit response: %w", err)
+			}
 			if payload.Code != 0 {
 				return fmt.Errorf("debugger exited with status %d: %s", payload.Code, payload.Error)
 			}
@@ -612,13 +740,24 @@ func terminalWrapper(args []string) error {
 		case "cancel":
 			return errors.New("debugger pane was cancelled")
 		case "error":
-			payload, _ := protocol.ParsePayload[protocol.ExitPayload](message)
+			if len(message.Payload) == 0 {
+				return errors.New("broker error response has no payload")
+			}
+			payload, err := protocol.ParsePayload[protocol.ExitPayload](message)
+			if err != nil {
+				return fmt.Errorf("decode broker error response: %w", err)
+			}
+			if payload.Error == "" {
+				return errors.New("broker returned an empty error")
+			}
 			return errors.New(payload.Error)
 		}
 	}
 }
 
 func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
+	defer stop()
 	provider := terminal.Provider
 	if provider == "" || provider == "auto" {
 		if os.Getenv("TMUX") != "" {
@@ -630,6 +769,8 @@ func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error 
 		}
 	}
 	cwd, _ := os.Getwd()
+	openContext, cancelOpen := context.WithTimeout(ctx, remotePaneOpenTimeout)
+	defer cancelOpen()
 	var open *exec.Cmd
 	switch provider {
 	case "tmux", "remote-tmux":
@@ -641,7 +782,7 @@ func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error 
 			arguments = append(arguments, "-h")
 		}
 		arguments = append(arguments, args...)
-		open = exec.Command("tmux", arguments...)
+		open = subprocess.CommandContext(openContext, "tmux", arguments...)
 	case "zellij", "remote-zellij":
 		if os.Getenv("ZELLIJ") == "" {
 			return errors.New("remote Zellij provider is not active")
@@ -651,30 +792,42 @@ func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error 
 			arguments[4] = "down"
 		}
 		arguments = append(arguments, args...)
-		open = exec.Command("zellij", arguments...)
+		open = subprocess.CommandContext(openContext, "zellij", arguments...)
 	default:
+		cancelOpen()
 		return fmt.Errorf("provider %q cannot be used with remote terminal scope", provider)
 	}
-	output, err := open.CombinedOutput()
+	openResult, err := subprocess.Capture(openContext, open, maxAgentCommandOutput, subprocess.DiagnosticLimit)
+	cancelOpen()
 	if err != nil {
-		return fmt.Errorf("open remote %s pane: %w: %s", provider, err, strings.TrimSpace(string(output)))
+		if detail := openResult.Diagnostic(); detail != "" {
+			return fmt.Errorf("open remote %s pane: %w: %s", provider, err, detail)
+		}
+		return fmt.Errorf("open remote %s pane: %w", provider, err)
 	}
+	output := openResult.Stdout
 	paneID := strings.TrimSpace(string(output))
 	if paneID == "" {
 		return errors.New("remote multiplexer returned no pane id")
 	}
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	defer signal.Stop(signals)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-signals:
+		case <-ctx.Done():
 			closeRemotePane(provider, paneID)
 			return errors.New("remote debugger pane cancelled")
 		case <-ticker.C:
-			if !remotePaneExists(provider, paneID) {
+			exists, inspectErr := remotePaneExists(ctx, provider, paneID)
+			if inspectErr != nil {
+				closeRemotePane(provider, paneID)
+				return fmt.Errorf("inspect remote %s pane: %w", provider, inspectErr)
+			}
+			if !exists {
+				if ctx.Err() != nil {
+					closeRemotePane(provider, paneID)
+					return errors.New("remote debugger pane cancelled")
+				}
 				return nil
 			}
 		}
@@ -682,22 +835,41 @@ func remoteTerminalWrapper(args []string, terminal protocol.TerminalSpec) error 
 }
 
 func closeRemotePane(provider, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), remotePaneQueryTimeout)
+	defer cancel()
 	if strings.Contains(provider, "tmux") {
-		_ = exec.Command("tmux", "kill-pane", "-t", id).Run()
+		_ = subprocess.CommandContext(ctx, "tmux", "kill-pane", "-t", id).Run()
 	} else {
-		_ = exec.Command("zellij", "action", "close-pane", "--pane-id", id).Run()
+		_ = subprocess.CommandContext(ctx, "zellij", "action", "close-pane", "--pane-id", id).Run()
 	}
 }
 
-func remotePaneExists(provider, id string) bool {
+func remotePaneExists(parent context.Context, provider, id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(parent, remotePaneQueryTimeout)
+	defer cancel()
 	if strings.Contains(provider, "tmux") {
-		return exec.Command("tmux", "display-message", "-p", "-t", id, "#{pane_id}").Run() == nil
+		err := subprocess.CommandContext(ctx, "tmux", "display-message", "-p", "-t", id, "#{pane_id}").Run()
+		if parentErr := parent.Err(); parentErr != nil {
+			return false, parentErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return false, fmt.Errorf("query tmux pane: %w", ctxErr)
+		}
+		return err == nil, nil
 	}
-	out, err := exec.Command("zellij", "action", "list-panes", "--json").Output()
+	command := subprocess.CommandContext(ctx, "zellij", "action", "list-panes", "--json")
+	result, err := subprocess.Capture(ctx, command, maxAgentPaneInventory, subprocess.DiagnosticLimit)
 	if err != nil {
-		return false
+		if parentErr := parent.Err(); parentErr != nil {
+			return false, parentErr
+		}
+		if detail := result.Diagnostic(); detail != "" {
+			return false, fmt.Errorf("query Zellij panes: %w: %s", err, detail)
+		}
+		return false, fmt.Errorf("query Zellij panes: %w", err)
 	}
-	return strings.Contains(string(out), `"id":`+strings.TrimPrefix(id, "terminal_")) || strings.Contains(string(out), `"id": `+strings.TrimPrefix(id, "terminal_"))
+	out := result.Stdout
+	return strings.Contains(string(out), `"id":`+strings.TrimPrefix(id, "terminal_")) || strings.Contains(string(out), `"id": `+strings.TrimPrefix(id, "terminal_")), nil
 }
 
 func decodeRequest(args []string, target any) error {
@@ -937,14 +1109,7 @@ func loadTerminalConfig() (terminalConfig, error) {
 		return config, err
 	}
 	path := filepath.Join(filepath.Dir(filepath.Dir(executable)), "terminal.json")
-	info, err := os.Lstat(path)
-	if err != nil {
-		return config, fmt.Errorf("read pwntools terminal session: %w", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		return config, errors.New("pwntools terminal session state is not a private regular file")
-	}
-	if err := fsutil.ReadJSONLimit(path, protocol.MaxFrame, &config); err != nil {
+	if err := fsutil.ReadPrivateJSONLimit(path, protocol.MaxFrame, &config); err != nil {
 		return config, fmt.Errorf("read pwntools terminal session: %w", err)
 	}
 	if err := validateTerminalConfig(config); err != nil {
@@ -961,7 +1126,7 @@ func validateTerminalConfig(config terminalConfig) error {
 	if terminal.Scope != "host" && terminal.Scope != "remote" {
 		return errors.New("invalid pwntools terminal scope")
 	}
-	if terminal.Provider == "" || len(terminal.Provider) > 80 || strings.IndexAny(terminal.Provider, "\x00\r\n") >= 0 {
+	if terminal.Provider == "" || len(terminal.Provider) > 80 || strings.ContainsAny(terminal.Provider, "\x00\r\n") {
 		return errors.New("invalid pwntools terminal provider")
 	}
 	switch terminal.Placement {

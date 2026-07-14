@@ -5,6 +5,10 @@ Both formats are strict TOML; global configuration uses schema 2 and portable
 project configuration remains schema 1. Legacy global schema 1 loads
 transparently and is upgraded atomically on the next write. An unknown key,
 unsupported schema, unsafe value, or invalid combination is an error.
+Configuration reads stop at 1 MiB, and the TOML parser rejects pathological
+array/inline-table nesting before it can exhaust the process stack. Decode
+errors identify the exact file, line, column, and key when available without
+echoing the value or surrounding file contents.
 
 Inspect exactly what is active with:
 
@@ -33,8 +37,9 @@ so an explicit `false` is not mistaken for an omitted setting.
 ## Global configuration
 
 The global path is `$XDG_CONFIG_HOME/pwnbridge/config.toml`, falling back to
-`~/.config/pwnbridge/config.toml`. `pwnbridge host add` creates it safely; users
-normally do not need to write it first.
+`~/.config/pwnbridge/config.toml`. `pwnbridge host add` creates it safely and
+loads only this global layer, so an unrelated project-file error cannot block
+machine host registration. Users normally do not need to write it first.
 
 ```toml
 schema = 2
@@ -104,7 +109,8 @@ hyphens; SSH destination aliases may be more descriptive.
 Use these commands rather than hand-editing host records:
 
 ```console
-pwnbridge host add NAME DESTINATION [--shell-transport auto|mosh|ssh]
+pwnbridge host add NAME DESTINATION [--check] [--replace] [--default] [--json]
+                                     [--shell-transport auto|mosh|ssh]
                                      [--mosh-port PORT[:PORT]]
 pwnbridge host list
 pwnbridge host show NAME
@@ -112,14 +118,28 @@ pwnbridge host transport NAME auto|mosh|ssh [--mosh-port PORT[:PORT]]
 pwnbridge host default NAME
 pwnbridge host use NAME
 pwnbridge host use --default
-pwnbridge host remove NAME
+pwnbridge host remove NAME --dry-run
+pwnbridge host remove NAME --yes
 ```
 
-`host default` changes the machine-wide fallback. `host use NAME` stores a
+The first host becomes the machine default. Later additions preserve it unless
+`--default` is given, and an existing name requires `--replace`. `--check`
+validates read-only SSH and bootstrap readiness before the atomic global write;
+a failed new or replacement check does not alter the file. Without `--check`,
+registration is deliberately local-only. `host default` changes the
+machine-wide fallback. `host use NAME` stores a
 local project-to-host binding under XDG state, while `host use --default`
 removes that override. None of these commands put a machine name into the
 project checkout. `host list` marks the machine default with `*` and the
 current project's effective host with `>`.
+
+Host removal never edits remote state. Preview and confirmation inventory all
+private local bindings, workspace lifecycle records, recovery roots, and live
+session leases. Normal removal refuses a default or referenced host. Use
+`--force --yes` only to preserve those inactive references as deliberately
+dangling state; re-registering the identical name reconnects them. Active
+sessions cannot be forced. The command is machine-global and remains usable
+when the current project's TOML is malformed.
 
 Host selection specifically follows this precedence, from lowest to highest:
 

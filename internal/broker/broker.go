@@ -18,6 +18,7 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/agent"
 	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/protocol"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/terminal/provider"
 	"github.com/simonfalke-01/pwnbridge/internal/transport"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
@@ -25,6 +26,14 @@ import (
 
 const MaxPanes = 8
 const maxOpenRequestsPerMinute = 32
+
+// Each debugger uses a wrapper and pane connection. Keep enough headroom for
+// all panes plus short-lived ping and synchronization-barrier requests while
+// bounding file descriptors and goroutines before authentication completes.
+const maxBrokerConnections = 32
+const brokerHandshakeTimeout = 5 * time.Second
+const brokerProviderOpenTimeout = 30 * time.Second
+const brokerProviderCloseTimeout = 5 * time.Second
 
 type SessionRecord struct {
 	Schema                int                  `json:"schema"`
@@ -69,11 +78,11 @@ func SaveSession(path string, record SessionRecord) error {
 
 func LoadSession(path string) (SessionRecord, error) {
 	var record SessionRecord
-	if err := fsutil.ReadJSON(path, &record); err != nil {
+	if err := fsutil.ReadPrivateJSONLimit(path, protocol.MaxFrame, &record); err != nil {
 		return record, err
 	}
 	if record.Schema != 1 || record.OwnerPID <= 0 || !validID(record.ID) || len(record.Token) < 32 ||
-		record.RecordPath != path || record.LeasePath != path+".lease" || !validRuntime(record) {
+		filepath.Base(path) != record.ID+".json" || record.RecordPath != path || record.LeasePath != path+".lease" || !validRuntime(record) {
 		return record, errors.New("invalid broker session record")
 	}
 	return record, nil
@@ -113,22 +122,57 @@ type request struct {
 }
 
 type Broker struct {
-	Record      SessionRecord
-	Registry    *provider.Registry
-	listener    net.Listener
-	tcpListener net.Listener
-	mu          sync.Mutex
-	requests    map[string]*request
-	openTimes   []time.Time
-	done        chan struct{}
-	BeforeOpen  func(context.Context) error
+	Record           SessionRecord
+	Registry         *provider.Registry
+	listener         net.Listener
+	tcpListener      net.Listener
+	mu               sync.Mutex
+	requests         map[string]*request
+	openTimes        []time.Time
+	done             chan struct{}
+	connectionSlots  chan struct{}
+	connections      map[net.Conn]struct{}
+	connectionWait   sync.WaitGroup
+	closing          bool
+	handshakeTimeout time.Duration
+	lifecycleContext context.Context
+	cancelLifecycle  context.CancelFunc
+	providerOpenTTL  time.Duration
+	providerCloseTTL time.Duration
+	closeOnce        sync.Once
+	BeforeOpen       func(context.Context) error
 }
 
 func New(record SessionRecord, registry *provider.Registry) *Broker {
-	return &Broker{Record: record, Registry: registry, requests: map[string]*request{}, done: make(chan struct{})}
+	lifecycleContext, cancelLifecycle := context.WithCancel(context.Background())
+	return &Broker{
+		Record: record, Registry: registry, requests: map[string]*request{}, done: make(chan struct{}),
+		connectionSlots: make(chan struct{}, maxBrokerConnections), connections: map[net.Conn]struct{}{},
+		handshakeTimeout: brokerHandshakeTimeout,
+		lifecycleContext: lifecycleContext, cancelLifecycle: cancelLifecycle,
+		providerOpenTTL: brokerProviderOpenTimeout, providerCloseTTL: brokerProviderCloseTimeout,
+	}
 }
 
 func (b *Broker) Start() error {
+	b.mu.Lock()
+	if b.closing {
+		b.mu.Unlock()
+		return errors.New("broker is closed")
+	}
+	if b.connections == nil {
+		b.connections = map[net.Conn]struct{}{}
+	}
+	b.mu.Unlock()
+	if b.connectionSlots == nil {
+		b.connectionSlots = make(chan struct{}, maxBrokerConnections)
+	}
+	if b.handshakeTimeout <= 0 {
+		b.handshakeTimeout = brokerHandshakeTimeout
+	}
+	if b.lifecycleContext == nil {
+		b.lifecycleContext, b.cancelLifecycle = context.WithCancel(context.Background())
+	}
 	if err := os.MkdirAll(filepath.Dir(b.Record.LocalSocket), 0o700); err != nil {
 		return err
 	}
@@ -155,23 +199,39 @@ func (b *Broker) Start() error {
 }
 
 func (b *Broker) Close() error {
-	select {
-	case <-b.done:
-	default:
+	b.closeOnce.Do(b.close)
+	return nil
+}
+
+func (b *Broker) close() {
+	if b.cancelLifecycle != nil {
+		b.cancelLifecycle()
+	}
+	if b.done != nil {
 		close(b.done)
 	}
+	b.mu.Lock()
+	b.closing = true
+	requests := make([]*request, 0, len(b.requests))
+	for _, request := range b.requests {
+		requests = append(requests, request)
+	}
+	connections := make([]net.Conn, 0, len(b.connections))
+	for connection := range b.connections {
+		connections = append(connections, connection)
+	}
+	b.requests = map[string]*request{}
+	b.mu.Unlock()
 	if b.listener != nil {
 		_ = b.listener.Close()
 	}
 	if b.tcpListener != nil {
 		_ = b.tcpListener.Close()
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, request := range b.requests {
-		if request.provider != nil && request.handle.ID != "" {
-			_ = request.provider.Close(context.Background(), request.handle)
-		}
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
+	for _, request := range requests {
 		if request.wrapper != nil {
 			_ = request.wrapper.conn.Close()
 		}
@@ -179,9 +239,47 @@ func (b *Broker) Close() error {
 			_ = request.pane.conn.Close()
 		}
 	}
-	b.requests = map[string]*request{}
+	b.closeRequests(requests)
+	b.connectionWait.Wait()
 	_ = os.Remove(b.Record.LocalSocket)
-	return nil
+}
+
+func (b *Broker) lifecycle() context.Context {
+	if b.lifecycleContext != nil {
+		return b.lifecycleContext
+	}
+	return context.Background()
+}
+
+func (b *Broker) providerOpenContext() (context.Context, context.CancelFunc) {
+	timeout := b.providerOpenTTL
+	if timeout <= 0 {
+		timeout = brokerProviderOpenTimeout
+	}
+	return context.WithTimeout(b.lifecycle(), timeout)
+}
+
+func (b *Broker) providerCloseTimeout() time.Duration {
+	if b.providerCloseTTL > 0 {
+		return b.providerCloseTTL
+	}
+	return brokerProviderCloseTimeout
+}
+
+func (b *Broker) closeProvider(terminalProvider provider.Provider, handle provider.Handle) {
+	ctx, cancel := context.WithTimeout(context.Background(), b.providerCloseTimeout())
+	defer cancel()
+	_ = terminalProvider.Close(ctx, handle)
+}
+
+func (b *Broker) closeRequests(requests []*request) {
+	ctx, cancel := context.WithTimeout(context.Background(), b.providerCloseTimeout())
+	defer cancel()
+	for _, request := range requests {
+		if request.provider != nil && request.handle.ID != "" {
+			_ = request.provider.Close(ctx, request.handle)
+		}
+	}
 }
 
 func (b *Broker) serve() {
@@ -199,12 +297,39 @@ func (b *Broker) serveListener(listener net.Listener) {
 				continue
 			}
 		}
-		go b.handle(&peer{conn: conn})
+		select {
+		case b.connectionSlots <- struct{}{}:
+			b.mu.Lock()
+			if b.closing {
+				b.mu.Unlock()
+				<-b.connectionSlots
+				_ = conn.Close()
+				continue
+			}
+			b.connections[conn] = struct{}{}
+			b.connectionWait.Add(1)
+			b.mu.Unlock()
+			go func() {
+				defer func() {
+					b.mu.Lock()
+					delete(b.connections, conn)
+					b.mu.Unlock()
+					<-b.connectionSlots
+					b.connectionWait.Done()
+				}()
+				b.handle(&peer{conn: conn})
+			}()
+		default:
+			_ = conn.Close()
+		}
 	}
 }
 
 func (b *Broker) handle(p *peer) {
 	defer p.conn.Close()
+	if err := p.conn.SetReadDeadline(time.Now().Add(b.handshakeTimeout)); err != nil {
+		return
+	}
 	reader := bufio.NewReader(p.conn)
 	var first protocol.Message
 	if err := protocol.Decode(reader, &first); err != nil {
@@ -214,12 +339,15 @@ func (b *Broker) handle(p *peer) {
 		_ = p.send(errorMessage(first, err))
 		return
 	}
+	if err := p.conn.SetReadDeadline(time.Time{}); err != nil {
+		return
+	}
 	switch first.Type {
 	case "ping":
 		_ = p.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "pong", SessionID: b.Record.ID, Token: b.Record.Token})
 	case "barrier":
 		if b.BeforeOpen != nil {
-			if err := b.BeforeOpen(context.Background()); err != nil {
+			if err := b.BeforeOpen(b.lifecycle()); err != nil {
 				_ = p.send(errorMessage(first, fmt.Errorf("shell sync barrier: %w", err)))
 				return
 			}
@@ -264,13 +392,15 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 	b.requests[open.RequestID] = req
 	b.mu.Unlock()
 	if b.BeforeOpen != nil {
-		if err := b.BeforeOpen(context.Background()); err != nil {
+		if err := b.BeforeOpen(b.lifecycle()); err != nil {
 			b.fail(open.RequestID, fmt.Errorf("debugger sync barrier: %w", err))
 			return
 		}
 	}
 
-	terminalProvider, capabilities, err := b.Registry.Select(context.Background(), b.Record.Provider)
+	providerContext, cancelProvider := b.providerOpenContext()
+	defer cancelProvider()
+	terminalProvider, capabilities, err := b.Registry.Select(providerContext, b.Record.Provider)
 	if err != nil {
 		b.fail(open.RequestID, err)
 		return
@@ -296,7 +426,7 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 		NearCurrentPane: b.Record.ZellijNearCurrentPane, RequireVisible: true,
 		Command: []string{b.Record.Executable, "__pane", "--record", b.Record.RecordPath, "--session", b.Record.ID, "--request", open.RequestID},
 	}
-	handle, err := terminalProvider.Open(context.Background(), spec)
+	handle, err := terminalProvider.Open(providerContext, spec)
 	if err != nil {
 		b.fail(open.RequestID, err)
 		return
@@ -304,7 +434,7 @@ func (b *Broker) handleWrapper(p *peer, reader *bufio.Reader, open protocol.Mess
 	b.mu.Lock()
 	if b.requests[open.RequestID] != req {
 		b.mu.Unlock()
-		_ = terminalProvider.Close(context.Background(), handle)
+		b.closeProvider(terminalProvider, handle)
 		return
 	}
 	req.provider, req.handle = terminalProvider, handle
@@ -366,12 +496,15 @@ func (b *Broker) finish(id string, message protocol.Message) {
 	if req == nil {
 		return
 	}
-	payload, _ := protocol.ParsePayload[protocol.ExitPayload](message)
+	payload, payloadErr := protocol.ParsePayload[protocol.ExitPayload](message)
+	if len(message.Payload) == 0 || payloadErr != nil {
+		payload = protocol.ExitPayload{Code: 1, Error: "invalid debugger exit payload"}
+	}
 	if req.wrapper != nil {
 		_ = req.wrapper.send(protocol.Message{Protocol: version.ProtocolVersion, Type: "exited", SessionID: b.Record.ID, RequestID: id, Token: b.Record.Token, Payload: protocol.Payload(payload)})
 	}
 	if req.provider != nil && req.handle.ID != "" && (payload.Code == 0 && b.Record.CloseOnSuccess || payload.Code != 0 && !b.Record.HoldOnFailure) {
-		_ = req.provider.Close(context.Background(), req.handle)
+		b.closeProvider(req.provider, req.handle)
 	}
 }
 
@@ -393,7 +526,7 @@ func (b *Broker) cancel(id, reason string) {
 		_ = req.pane.send(message)
 	}
 	if req.provider != nil && req.handle.ID != "" {
-		_ = req.provider.Close(context.Background(), req.handle)
+		b.closeProvider(req.provider, req.handle)
 	}
 }
 
@@ -501,7 +634,7 @@ func RunPane(ctx context.Context, record SessionRecord, requestID string) error 
 		return err
 	}
 	remote := remoteAgentCommand(record.AgentPath, "pane", encoded)
-	cmd := exec.CommandContext(ctx, "ssh", "-S", record.ControlPath, "-tt", "-e", "none", record.Destination, remote)
+	cmd := subprocess.CommandContext(ctx, "ssh", "-S", record.ControlPath, "-tt", "-e", "none", record.Destination, remote)
 	cmd.Env = transport.SafeSSHEnvironment()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	wasCancelled := false

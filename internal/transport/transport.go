@@ -16,10 +16,24 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/simonfalke-01/pwnbridge/internal/agent"
+	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
+	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
+)
+
+const (
+	maxAgentAssetBytes       = 16 << 20
+	maxSSHProbeOutputBytes   = 64 << 10
+	maxSSHCommandOutputBytes = 1 << 20
+	maxAgentProbeOutputBytes = 1 << 20
+	maxAgentResponseBytes    = 2 << 20
+	masterCloseTimeout       = 5 * time.Second
+	masterInterruptTimeout   = time.Second
+	masterPostKillWaitLimit  = 2 * time.Second
 )
 
 type Client struct {
@@ -56,6 +70,8 @@ type Master struct {
 	RelayPIDFile  string
 	process       *exec.Cmd
 	done          chan error
+	closeTimeout  time.Duration
+	closeOnce     sync.Once
 }
 
 func New(destination, agentPath string) Client {
@@ -64,17 +80,29 @@ func New(destination, agentPath string) Client {
 
 func (c Client) BasicProbe(ctx context.Context) (HostProbe, error) {
 	command := `printf '__PWNBRIDGE_HOME__%s\n' "$HOME"; printf '__PWNBRIDGE_OS__'; uname -s; printf '__PWNBRIDGE_ARCH__'; uname -m`
-	out, err := c.run(ctx, "-T", c.Destination, command)
+	out, err := c.runBounded(ctx, maxSSHProbeOutputBytes, "-T", c.Destination, command)
 	if err != nil {
 		return HostProbe{}, err
 	}
 	return parseBasicProbe(out)
 }
 
-// Raw runs a non-interactive command on the destination. When the client was
-// obtained from a Master, it automatically reuses that private connection.
+// Raw runs a non-interactive management command on the destination and retains
+// at most 1 MiB of combined output. When the client was obtained from a Master,
+// it automatically reuses that private connection. Deliberate bulk streams use
+// dedicated pipe-based paths instead.
 func (c Client) Raw(ctx context.Context, command string) ([]byte, error) {
 	return c.run(ctx, "-T", c.Destination, command)
+}
+
+// RawBounded runs a non-interactive command while retaining at most limit
+// combined stdout/stderr bytes. Excess output is drained so the SSH process can
+// finish normally, then reported as an error without returning discarded data.
+func (c Client) RawBounded(ctx context.Context, command string, limit int) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("SSH output limit must be positive")
+	}
+	return c.runBounded(ctx, limit, "-T", c.Destination, command)
 }
 
 // RunPTY executes one script through one ordinary SSH PTY. Bootstrap uses this
@@ -86,7 +114,7 @@ func (c Client) RunPTY(ctx context.Context, stdin io.Reader, stdout, stderr io.W
 		args = append(args, "-o", "ControlPath="+c.ControlPath)
 	}
 	args = append(args, "--", c.Destination, command)
-	cmd := exec.CommandContext(ctx, c.SSH, args...)
+	cmd := subprocess.CommandContext(ctx, c.SSH, args...)
 	cmd.Env = SafeSSHEnvironment()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
@@ -138,9 +166,8 @@ func (c Client) CheckRemoteForwarding(ctx context.Context) error {
 		return fmt.Errorf("start forwarding probe: %w", err)
 	}
 	defer master.Close()
-	cmd := c.sshCommand(ctx, "-S", master.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:127.0.0.1:9", c.Destination)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("reverse SSH forwarding is unavailable: %w: %s", err, strings.TrimSpace(string(out)))
+	if out, err := c.runBounded(ctx, maxSSHProbeOutputBytes, "-S", master.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:127.0.0.1:9", c.Destination); err != nil {
+		return fmt.Errorf("reverse SSH forwarding is unavailable: %w", err)
 	} else if port, parseErr := strconv.Atoi(strings.TrimSpace(string(out))); parseErr != nil || port < 1 || port > 65535 {
 		return fmt.Errorf("SSH did not report an allocated reverse port: %q", strings.TrimSpace(string(out)))
 	}
@@ -148,7 +175,7 @@ func (c Client) CheckRemoteForwarding(ctx context.Context) error {
 }
 
 func (c Client) ProbeAgent(ctx context.Context) (HostProbe, error) {
-	out, err := c.run(ctx, "-T", c.Destination, remoteAgentCommand(c.AgentPath, "probe", ""))
+	out, err := c.runBounded(ctx, maxAgentProbeOutputBytes, "-T", c.Destination, remoteAgentCommand(c.AgentPath, "probe", ""))
 	if err != nil {
 		return HostProbe{}, err
 	}
@@ -166,7 +193,7 @@ func (c Client) ProbeAgent(ctx context.Context) (HostProbe, error) {
 }
 
 func (c Client) DeployAgent(ctx context.Context, localPath string) (string, error) {
-	data, err := os.ReadFile(localPath)
+	data, err := fsutil.ReadFileLimit(localPath, maxAgentAssetBytes)
 	if err != nil {
 		return "", fmt.Errorf("read agent asset: %w", err)
 	}
@@ -206,9 +233,19 @@ func (c Client) DeployAgent(ctx context.Context, localPath string) (string, erro
 		args = append(args, "-o", "ControlPath="+c.ControlPath)
 	}
 	args = append(args, "--", localPath, target)
-	cmd := exec.CommandContext(ctx, c.SCP, args...)
+	cmd := subprocess.CommandContext(ctx, c.SCP, args...)
 	cmd.Env = SafeSSHEnvironment()
-	if out, err := cmd.CombinedOutput(); err != nil {
+	output := boundedOutput{limit: maxSSHProbeOutputBytes}
+	cmd.Stdout, cmd.Stderr = &output, &output
+	err = cmd.Run()
+	out, exceeded := output.snapshot()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return "", ctxErr
+	}
+	if exceeded {
+		return "", fmt.Errorf("SCP output exceeded %d-byte limit", maxSSHProbeOutputBytes)
+	}
+	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
@@ -272,8 +309,9 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 	// enough for the session defer to stop containers, flush artifacts, and
 	// cancel forwards. It is terminated explicitly by Master.Close.
 	cmd := exec.Command(c.SSH, args...)
+	cmd.WaitDelay = subprocess.WaitDelay
 	cmd.Env = SafeSSHEnvironment()
-	var masterOutput bytes.Buffer
+	masterOutput := boundedOutput{limit: maxSSHProbeOutputBytes}
 	cmd.Stdin = nil
 	cmd.Stdout = &masterOutput
 	cmd.Stderr = &masterOutput
@@ -286,9 +324,17 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 	go func() { master.done <- cmd.Wait() }()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
+		if _, exceeded := masterOutput.snapshot(); exceeded {
+			_ = master.Close()
+			return nil, fmt.Errorf("SSH control master output exceeded %d-byte limit", maxSSHProbeOutputBytes)
+		}
 		select {
 		case processErr := <-master.done:
-			detail := strings.TrimSpace(masterOutput.String())
+			output, exceeded := masterOutput.snapshot()
+			if exceeded {
+				return nil, fmt.Errorf("SSH control master output exceeded %d-byte limit", maxSSHProbeOutputBytes)
+			}
+			detail := strings.TrimSpace(string(output))
 			if detail != "" {
 				return nil, fmt.Errorf("SSH control master exited during startup: %w: %s", processErr, detail)
 			}
@@ -297,6 +343,10 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 		}
 		check := c.sshCommand(ctx, "-S", control, "-O", "check", c.Destination)
 		if err := check.Run(); err == nil {
+			if _, exceeded := masterOutput.snapshot(); exceeded {
+				_ = master.Close()
+				return nil, fmt.Errorf("SSH control master output exceeded %d-byte limit", maxSSHProbeOutputBytes)
+			}
 			return master, nil
 		}
 		select {
@@ -322,19 +372,17 @@ func (m *Master) ConfigureBroker(ctx context.Context, localBroker, remoteBroker,
 }
 
 func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
-	forward := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-O", "forward", "-R", m.RemoteSocket+":"+m.LocalSocket, m.Client.Destination)
-	if output, forwardErr := forward.CombinedOutput(); forwardErr != nil {
+	if _, forwardErr := m.Client.runBounded(ctx, maxSSHProbeOutputBytes, "-S", m.ControlPath, "-O", "forward", "-R", m.RemoteSocket+":"+m.LocalSocket, m.Client.Destination); forwardErr != nil {
 		if localTCP == "" {
-			return fmt.Errorf("create reverse stream-local forward: %w: %s", forwardErr, strings.TrimSpace(string(output)))
+			return fmt.Errorf("create reverse stream-local forward: %w", forwardErr)
 		}
 		host, port, splitErr := net.SplitHostPort(localTCP)
 		if splitErr != nil {
 			return splitErr
 		}
-		fallback := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:"+host+":"+port, m.Client.Destination)
-		fallbackOut, fallbackErr := fallback.CombinedOutput()
+		fallbackOut, fallbackErr := m.Client.runBounded(ctx, maxSSHProbeOutputBytes, "-S", m.ControlPath, "-O", "forward", "-R", "127.0.0.1:0:"+host+":"+port, m.Client.Destination)
 		if fallbackErr != nil {
-			return fmt.Errorf("reverse forwarding unavailable (stream-local: %v; TCP: %w: %s)", forwardErr, fallbackErr, strings.TrimSpace(string(fallbackOut)))
+			return fmt.Errorf("reverse forwarding unavailable (stream-local: %v; TCP: %w)", forwardErr, fallbackErr)
 		}
 		allocated := strings.TrimSpace(string(fallbackOut))
 		portNumber, parseErr := strconv.Atoi(allocated)
@@ -351,8 +399,7 @@ func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
 			" </dev/null >/dev/null 2>&1 & pid=$!; printf '%s' \"$pid\" > " + shellQuote(relayPID) + "; " +
 			"i=0; while [ \"$i\" -lt 100 ]; do test -S " + shellQuote(m.RemoteSocket) + " && { printf relay; exit 0; }; " +
 			"kill -0 \"$pid\" 2>/dev/null || exit 1; i=$((i+1)); sleep 0.02; done; exit 1"
-		relay := m.Client.sshCommand(ctx, "-S", m.ControlPath, "-T", m.Client.Destination, relayScript)
-		if relayOut, relayErr := relay.CombinedOutput(); relayErr == nil && strings.TrimSpace(string(relayOut)) == "relay" {
+		if relayOut, relayErr := m.Client.runBounded(ctx, maxSSHProbeOutputBytes, "-S", m.ControlPath, "-T", m.Client.Destination, relayScript); relayErr == nil && strings.TrimSpace(string(relayOut)) == "relay" {
 			m.BrokerAddress = "unix:" + m.RemoteSocket
 			m.RelayPIDFile = relayPID
 		}
@@ -397,7 +444,7 @@ func (m *Master) MoshCommand(ctx context.Context, operation, encoded, port strin
 	if encoded != "" {
 		args = append(args, encoded)
 	}
-	cmd := exec.CommandContext(ctx, mosh, args...)
+	cmd := subprocess.CommandContext(ctx, mosh, args...)
 	cmd.Env = SafeMoshEnvironment()
 	return cmd
 }
@@ -421,11 +468,17 @@ func (m *Master) Run(ctx context.Context, operation string, request any) ([]byte
 		return nil, err
 	}
 	cmd := m.Command(ctx, false, operation, encoded)
-	out, err := cmd.CombinedOutput()
+	output := boundedOutput{limit: maxAgentResponseBytes}
+	cmd.Stdout, cmd.Stderr = &output, &output
+	err = cmd.Run()
+	out, exceeded := output.snapshot()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
+	if exceeded {
+		return out, fmt.Errorf("remote %s output exceeded %d-byte limit", operation, maxAgentResponseBytes)
+	}
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return out, ctxErr
-		}
 		return out, fmt.Errorf("remote %s: %w: %s", operation, err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
@@ -435,16 +488,27 @@ func (m *Master) Close() error {
 	if m == nil {
 		return nil
 	}
+	m.closeOnce.Do(m.close)
+	return nil
+}
+
+func (m *Master) close() {
+	timeout := m.closeTimeout
+	if timeout <= 0 {
+		timeout = masterCloseTimeout
+	}
+	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), timeout)
+	defer cancelCleanup()
 	if m.ControlPath != "" {
 		if m.RelayPIDFile != "" {
 			script := "pid=''; test ! -f " + shellQuote(m.RelayPIDFile) + " || pid=$(cat " + shellQuote(m.RelayPIDFile) + "); " +
 				"case \"$pid\" in ''|*[!0-9]*) ;; *) kill \"$pid\" 2>/dev/null || true ;; esac; " +
 				"rm -f -- " + shellQuote(m.RelayPIDFile) + " " + shellQuote(m.RemoteSocket)
-			cmd := exec.Command(m.Client.SSH, "-S", m.ControlPath, "-T", m.Client.Destination, script)
+			cmd := subprocess.CommandContext(cleanupContext, m.Client.SSH, "-S", m.ControlPath, "-T", m.Client.Destination, script)
 			cmd.Env = SafeSSHEnvironment()
 			_ = cmd.Run()
 		}
-		exit := exec.Command(m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination)
+		exit := subprocess.CommandContext(cleanupContext, m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination)
 		exit.Env = SafeSSHEnvironment()
 		_ = exit.Run()
 	}
@@ -453,35 +517,92 @@ func (m *Master) Close() error {
 			_ = m.process.Process.Signal(os.Interrupt)
 		}
 		if m.done != nil {
+			interruptTimer := time.NewTimer(masterInterruptTimeout)
 			select {
 			case <-m.done:
-			case <-time.After(time.Second):
+				if !interruptTimer.Stop() {
+					select {
+					case <-interruptTimer.C:
+					default:
+					}
+				}
+			case <-interruptTimer.C:
 				if m.process.Process != nil {
 					_ = m.process.Process.Kill()
+				}
+				killTimer := time.NewTimer(masterPostKillWaitLimit)
+				select {
+				case <-m.done:
+					if !killTimer.Stop() {
+						select {
+						case <-killTimer.C:
+						default:
+						}
+					}
+				case <-killTimer.C:
 				}
 			}
 		}
 	}
-	return nil
 }
 
 func (c Client) run(ctx context.Context, args ...string) ([]byte, error) {
+	return c.runBounded(ctx, maxSSHCommandOutputBytes, args...)
+}
+
+func (c Client) runBounded(ctx context.Context, limit int, args ...string) ([]byte, error) {
 	cmd := c.sshCommand(ctx, args...)
-	out, err := cmd.CombinedOutput()
+	output := boundedOutput{limit: limit}
+	cmd.Stdout, cmd.Stderr = &output, &output
+	err := cmd.Run()
+	out, exceeded := output.snapshot()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return out, ctxErr
+	}
+	if exceeded {
+		return out, fmt.Errorf("SSH output exceeded %d-byte limit", limit)
+	}
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return out, ctxErr
-		}
 		return out, fmt.Errorf("ssh: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+type boundedOutput struct {
+	mu       sync.Mutex
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (o *boundedOutput) Write(data []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	remaining := o.limit - o.buffer.Len()
+	if len(data) > remaining {
+		o.exceeded = true
+	}
+	if remaining > 0 {
+		keep := len(data)
+		if keep > remaining {
+			keep = remaining
+		}
+		_, _ = o.buffer.Write(data[:keep])
+	}
+	return len(data), nil
+}
+
+func (o *boundedOutput) snapshot() ([]byte, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return bytes.Clone(o.buffer.Bytes()), o.exceeded
 }
 
 func (c Client) sshCommand(ctx context.Context, args ...string) *exec.Cmd {
 	if c.ControlPath != "" && !hasControlPath(args) {
 		args = append([]string{"-S", c.ControlPath}, args...)
 	}
-	cmd := exec.CommandContext(ctx, c.SSH, args...)
+	cmd := subprocess.CommandContext(ctx, c.SSH, args...)
 	cmd.Env = SafeSSHEnvironment()
 	return cmd
 }
@@ -580,7 +701,7 @@ func normalizeArchitecture(value string) string {
 
 func FindAgentAsset(explicit string) (string, error) {
 	if explicit != "" {
-		if info, err := os.Stat(explicit); err == nil && !info.IsDir() {
+		if info, err := os.Stat(explicit); err == nil && info.Mode().IsRegular() {
 			return explicit, nil
 		}
 		return "", fmt.Errorf("agent asset %s does not exist", explicit)
@@ -594,7 +715,7 @@ func FindAgentAsset(explicit string) (string, error) {
 			return asset, nil
 		}
 	}
-	return "", errors.New("Linux agent asset not found; run `make build` or set PWNBRIDGE_AGENT_PATH")
+	return "", errors.New("linux agent asset not found; run `make build` or set PWNBRIDGE_AGENT_PATH")
 }
 
 func findAgentAssetFromExecutable(executable string) (string, bool) {
@@ -608,7 +729,7 @@ func findAgentAssetFromExecutable(executable string) (string, bool) {
 			filepath.Join(filepath.Dir(filepath.Dir(path)), "libexec", "pwnbridge", "pwnbridge-agent-linux-amd64"),
 		}
 		for _, candidate := range candidates {
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 				return filepath.Clean(candidate), true
 			}
 		}
