@@ -163,6 +163,7 @@ type zellijTab struct {
 type zellijPane struct {
 	ID       int  `json:"id"`
 	Plugin   bool `json:"is_plugin"`
+	Focused  bool `json:"is_focused"`
 	Exited   bool `json:"exited"`
 	TabID    int  `json:"tab_id"`
 	Position int  `json:"tab_position"`
@@ -220,11 +221,15 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 		return Handle{}, err
 	}
 	if spec.RequireVisible {
-		if err := waitForZellijPane(ctx, prefix, handle.ID); err != nil {
+		pane, err := waitForZellijPane(ctx, prefix, handle.ID)
+		if err != nil {
+			_ = Zellij{}.Close(ctx, handle)
 			return Handle{}, err
 		}
-		focusID := handle.ID
-		if !spec.Focus {
+		focusID := ""
+		if spec.Focus && !pane.Focused {
+			focusID = handle.ID
+		} else if !spec.Focus {
 			if origin := os.Getenv("ZELLIJ_PANE_ID"); origin != "" {
 				focusID = "terminal_" + strings.TrimPrefix(origin, "terminal_")
 			}
@@ -232,6 +237,7 @@ func (Zellij) Open(ctx context.Context, spec Spec) (Handle, error) {
 		if focusID != "" {
 			focusArgs := append(append([]string{}, prefix...), "action", "focus-pane-id", focusID)
 			if _, focusErr := providerOutput(ctx, maxProviderCommandOutput, "zellij", focusArgs...); focusErr != nil {
+				_ = Zellij{}.Close(ctx, handle)
 				return Handle{}, fmt.Errorf("zellij focus pane %s: %w", focusID, focusErr)
 			}
 		}
@@ -261,10 +267,10 @@ func currentZellijTabID(ctx context.Context, prefix []string) (int, error) {
 	return tab.ID, nil
 }
 
-func waitForZellijPane(ctx context.Context, prefix []string, handleID string) error {
+func waitForZellijPane(ctx context.Context, prefix []string, handleID string) (zellijPane, error) {
 	id, err := strconv.Atoi(strings.TrimPrefix(handleID, "terminal_"))
 	if err != nil {
-		return fmt.Errorf("invalid Zellij pane id %q", handleID)
+		return zellijPane{}, fmt.Errorf("invalid Zellij pane id %q", handleID)
 	}
 	for attempt := 0; attempt < 20; attempt++ {
 		args := append(append([]string{}, prefix...), "action", "list-panes", "--json")
@@ -272,28 +278,28 @@ func waitForZellijPane(ctx context.Context, prefix []string, handleID string) er
 		if listErr == nil {
 			var panes []zellijPane
 			if decodeErr := json.Unmarshal(out, &panes); decodeErr != nil {
-				return fmt.Errorf("decode Zellij panes: %w", decodeErr)
+				return zellijPane{}, fmt.Errorf("decode Zellij panes: %w", decodeErr)
 			}
 			for _, pane := range panes {
 				if pane.ID == id && !pane.Plugin {
-					return nil
+					return pane, nil
 				}
 			}
 		} else if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
+			return zellijPane{}, ctxErr
 		} else {
 			var exitErr *exec.ExitError
 			if !errors.As(listErr, &exitErr) {
-				return fmt.Errorf("query Zellij panes: %w", listErr)
+				return zellijPane{}, fmt.Errorf("query Zellij panes: %w", listErr)
 			}
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return zellijPane{}, ctx.Err()
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("Zellij returned pane %s but it never became visible", handleID)
+	return zellijPane{}, fmt.Errorf("Zellij returned pane %s but it never became visible", handleID)
 }
 func (Zellij) Inspect(ctx context.Context, h Handle) (State, error) {
 	if h.Aux == "tab" {

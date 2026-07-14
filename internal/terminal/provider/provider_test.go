@@ -64,7 +64,8 @@ printf '\n' >> "$PWNBRIDGE_PROVIDER_TEST_LOG"
 case "$*" in
   *"current-tab-info --json"*) printf '{"tab_id":9}' ;;
   *"list-tabs --json"*) printf '[{"position":1,"tab_id":9}]' ;;
-  *"list-panes --json"*) printf '[{"id":7,"is_plugin":false,"exited":false,"tab_id":9,"tab_position":1}]' ;;
+  *"list-panes --json"*) printf '[{"id":7,"is_plugin":false,"is_focused":true,"exited":false,"tab_id":9,"tab_position":1}]' ;;
+  *"focus-pane-id terminal_7"*) printf 'Pane Terminal(7) is already focused\n' >&2; exit 2 ;;
   *"new-tab"*) printf '9\n' ;;
   *"new-pane"*) printf 'terminal_7\n' ;;
 esac
@@ -82,6 +83,13 @@ esac
 		if err != nil || handle.ID != "terminal_7" {
 			t.Fatalf("%s open: handle=%#v err=%v", placement, handle, err)
 		}
+	}
+	t.Setenv("ZELLIJ_PANE_ID", "3")
+	unfocused := base
+	unfocused.Placement = "right"
+	unfocused.Focus = false
+	if _, err := p.Open(context.Background(), unfocused); err != nil {
+		t.Fatalf("unfocused open: %v", err)
 	}
 	tabSpec := base
 	tabSpec.Placement = "tab"
@@ -106,7 +114,7 @@ esac
 		t.Fatal(err)
 	}
 	log := string(logData)
-	for _, wanted := range []string{"<current-tab-info><--json>", "<--tab-id><9><--direction><right>", "<--direction><down>", "<--floating>", "<focus-pane-id><terminal_7>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
+	for _, wanted := range []string{"<current-tab-info><--json>", "<--tab-id><9><--direction><right>", "<--direction><down>", "<--floating>", "<focus-pane-id><terminal_3>", "<new-tab>", "<go-to-tab><2>", "<close-tab><--tab-id><9>", "<printf><a b>"} {
 		if !strings.Contains(log, wanted) {
 			t.Fatalf("missing %q in Zellij calls:\n%s", wanted, log)
 		}
