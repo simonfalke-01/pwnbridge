@@ -216,7 +216,7 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext, client transpor
 	spec := syncer.Spec{Workspace: p.WS, Destination: p.Host.Destination, Config: p.Config.Global.Sync, Ignores: ignores}
 	timeout, cancel := context.WithTimeout(ctx, p.Config.Global.Sync.BarrierTimeout)
 	defer cancel()
-	if err := p.Sync.Ensure(timeout, spec, &p.State); err != nil {
+	if _, err := p.Sync.Prepare(timeout, spec, &p.State); err != nil {
 		return err
 	}
 	p.State.RemoteRetained = true
@@ -224,6 +224,33 @@ func (a *App) ensureSync(ctx context.Context, p *projectContext, client transpor
 		return err
 	}
 	return nil
+}
+
+const maxSharedControlSocketPath = 96
+
+func (a *App) sharedControlDir(p *projectContext) (string, error) {
+	key := workspace.Fingerprint("ssh-v1", p.WS.MachineID, p.WS.ID, p.Host.Destination)[:24]
+	root := filepath.Join(a.Paths.Cache, "ssh")
+	candidate := filepath.Join(root, key)
+	if len(filepath.Join(candidate, "c")) > maxSharedControlSocketPath {
+		root = filepath.Join(os.TempDir(), fmt.Sprintf("pwnbridge-%d", os.Getuid()), "ssh")
+		candidate = filepath.Join(root, key)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", fmt.Errorf("create shared SSH cache root: %w", err)
+	}
+	if err := fsutil.ValidatePrivateDirectory(root); err != nil {
+		return "", fmt.Errorf("validate shared SSH cache root: %w", err)
+	}
+	return candidate, nil
+}
+
+func (a *App) stopSharedControlMaster(ctx context.Context, p *projectContext) error {
+	dir, err := a.sharedControlDir(p)
+	if err != nil {
+		return err
+	}
+	return transport.New(p.Host.Destination, "").StopSharedControlMaster(ctx, dir)
 }
 
 func (a *App) barrier(ctx context.Context, p *projectContext) error {
@@ -364,31 +391,43 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 
 	progress.Stage("Connecting to " + p.HostID)
 	client := transport.New(p.Host.Destination, "")
-	master, err = client.StartControlMaster(ctx, runtimeDir)
+	controlDir, err := a.sharedControlDir(p)
+	if err != nil {
+		return nil, err
+	}
+	master, err = client.StartSharedControlMaster(ctx, controlDir)
 	if err != nil {
 		return nil, err
 	}
 	client = master.Client
 
 	progress.Stage("Syncing workspace")
-	if err := a.ensureSync(ctx, p, client); err != nil {
-		return nil, err
+	type agentPreparation struct {
+		path  string
+		probe transport.HostProbe
+		err   error
 	}
-	if err := a.barrier(ctx, p); err != nil {
-		return nil, err
+	prepareCtx, cancelPrepare := context.WithCancel(ctx)
+	prepared := make(chan agentPreparation, 1)
+	go func() {
+		path, probe, prepareErr := client.PrepareAgent(prepareCtx, asset)
+		prepared <- agentPreparation{path: path, probe: probe, err: prepareErr}
+	}()
+	syncErr := a.ensureSync(prepareCtx, p, client)
+	if syncErr != nil {
+		cancelPrepare()
 	}
-
-	progress.Stage("Preparing remote tools")
-	remoteAgent, err := client.DeployAgent(ctx, asset)
-	if err != nil {
-		return nil, err
+	agentResult := <-prepared
+	cancelPrepare()
+	if syncErr != nil {
+		return nil, syncErr
 	}
+	if agentResult.err != nil {
+		return nil, agentResult.err
+	}
+	remoteAgent, probe := agentResult.path, agentResult.probe
 	client.AgentPath = remoteAgent
 	master.Client.AgentPath = remoteAgent
-	probe, err := client.ProbeAgent(ctx)
-	if err != nil {
-		return nil, err
-	}
 	remoteDir := filepath.Join(probe.Home, ".cache", "pwnbridge", "sessions", id)
 	localSocket := filepath.Join(runtimeDir, "b.sock")
 	remoteSocket := filepath.Join(remoteDir, "broker.sock")
@@ -810,16 +849,27 @@ func (a *App) stopCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if p.State.MutagenIdentifier == "" {
-			return errors.New("workspace has no synchronization session")
+		hostLifecycle, err := workspace.AcquireLock(a.hostLifecycleLockPath(p.HostID))
+		if err != nil {
+			return fmt.Errorf("acquire host lifecycle lease: %w", err)
 		}
+		defer hostLifecycle.Close()
 		if err := a.stopActiveSessions(cmd.Context(), p.WS.LocalRoot, p.Config.Global.Sync.BarrierTimeout+30*time.Second); err != nil {
 			return err
 		}
-		if err := a.barrier(cmd.Context(), p); err != nil {
-			return err
+		closeControl := func(operationErr error) error {
+			return errors.Join(operationErr, a.stopSharedControlMaster(cmd.Context(), p))
 		}
-		return p.Sync.Pause(cmd.Context(), p.State.MutagenIdentifier)
+		if p.State.MutagenIdentifier == "" {
+			return closeControl(errors.New("workspace has no synchronization session"))
+		}
+		if err := a.barrier(cmd.Context(), p); err != nil {
+			return closeControl(err)
+		}
+		if err := p.Sync.Pause(cmd.Context(), p.State.MutagenIdentifier); err != nil {
+			return closeControl(err)
+		}
+		return closeControl(nil)
 	}}
 }
 
@@ -833,6 +883,11 @@ func (a *App) cleanCommand() *cobra.Command {
 		if remote && !yes {
 			return errors.New("remote deletion requires --yes")
 		}
+		hostLifecycle, err := workspace.AcquireLock(a.hostLifecycleLockPath(p.HostID))
+		if err != nil {
+			return fmt.Errorf("acquire host lifecycle lease: %w", err)
+		}
+		defer hostLifecycle.Close()
 		if err := a.stopActiveSessions(cmd.Context(), p.WS.LocalRoot, p.Config.Global.Sync.BarrierTimeout+30*time.Second); err != nil {
 			return err
 		}
@@ -847,6 +902,9 @@ func (a *App) cleanCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("remove remote workspace: %w", err)
 			}
+		}
+		if err := a.stopSharedControlMaster(cmd.Context(), p); err != nil {
+			return err
 		}
 		if err := saveCleanedWorkspace(p, remote); err != nil {
 			return fmt.Errorf("save cleaned workspace catalog: %w", err)

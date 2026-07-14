@@ -30,5 +30,17 @@ chmod +x "$TMP/challenge/ret2win"
 cd "$TMP/challenge"
 "$ROOT/bin/pwnbridge" host add lima lima-pwn
 "$ROOT/bin/pwnbridge" host use lima
+
+# Nearby concise commands reuse one bounded warm OpenSSH master.
+"$ROOT/bin/pb" true >/dev/null
+CONTROL=$(find "$XDG_CACHE_HOME/pwnbridge/ssh" -type s -name c -print)
+test -n "$CONTROL"
+test "$(printf '%s\n' "$CONTROL" | wc -l | tr -d ' ')" -eq 1
+CONTROL_INODE=$(ls -di "$CONTROL" | awk '{print $1}')
+"$ROOT/bin/pb" true >/dev/null
+test "$(ls -di "$CONTROL" | awk '{print $1}')" = "$CONTROL_INODE"
+ssh -S "$CONTROL" -O check lima-pwn >/dev/null
+
 expect "$ROOT/test/e2e/lima-shell.exp"
 "$ROOT/bin/pwnbridge" clean --remote --yes
+test ! -e "$CONTROL"

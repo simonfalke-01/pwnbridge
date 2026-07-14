@@ -23,6 +23,7 @@ import (
 	"github.com/simonfalke-01/pwnbridge/internal/fsutil"
 	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
 	"github.com/simonfalke-01/pwnbridge/internal/version"
+	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 )
 
 const (
@@ -68,11 +69,15 @@ type Master struct {
 	BrokerAddress string
 	LocalSocket   string
 	RelayPIDFile  string
+	ForwardSpec   string
+	Shared        bool
 	process       *exec.Cmd
 	done          chan error
 	closeTimeout  time.Duration
 	closeOnce     sync.Once
 }
+
+const sharedControlPersist = "2m"
 
 func New(destination, agentPath string) Client {
 	return Client{SSH: "ssh", SCP: "scp", Mosh: "mosh", Destination: destination, AgentPath: agentPath}
@@ -179,6 +184,10 @@ func (c Client) ProbeAgent(ctx context.Context) (HostProbe, error) {
 	if err != nil {
 		return HostProbe{}, err
 	}
+	return decodeAgentProbe(out)
+}
+
+func decodeAgentProbe(out []byte) (HostProbe, error) {
 	var probe HostProbe
 	if err := json.Unmarshal(out, &probe); err != nil {
 		return HostProbe{}, fmt.Errorf("decode agent probe: %w", err)
@@ -190,6 +199,41 @@ func (c Client) ProbeAgent(ctx context.Context) (HostProbe, error) {
 		return probe, fmt.Errorf("unsupported remote platform %s/%s", probe.OS, probe.Architecture)
 	}
 	return probe, nil
+}
+
+// PrepareAgent verifies and probes the content-addressed cached agent in one
+// SSH channel. Cache absence or replacement falls back to the existing atomic
+// deployment path; a valid cache is never trusted without a fresh SHA-256.
+func (c Client) PrepareAgent(ctx context.Context, localPath string) (string, HostProbe, error) {
+	data, err := fsutil.ReadFileLimit(localPath, maxAgentAssetBytes)
+	if err != nil {
+		return "", HostProbe{}, fmt.Errorf("read agent asset: %w", err)
+	}
+	hash := sha256.Sum256(data)
+	digest := hex.EncodeToString(hash[:])
+	relative := filepath.ToSlash(filepath.Join(".local", "share", "pwnbridge", "agents", strconv.Itoa(version.ProtocolVersion), digest, "pwnbridge-agent"))
+	remote := "~/" + relative
+	resolved := `"$HOME"/` + shellQuote(relative)
+	command := "remote=" + resolved + "; test -x \"$remote\" || exit 42; " +
+		"test \"$(sha256sum \"$remote\" | cut -d' ' -f1)\" = " + shellQuote(digest) + " || exit 42; " +
+		"exec \"$remote\" probe"
+	out, probeErr := c.runBounded(ctx, maxAgentProbeOutputBytes, "-T", c.Destination, command)
+	if probeErr == nil {
+		probe, decodeErr := decodeAgentProbe(out)
+		return remote, probe, decodeErr
+	}
+	var exit *exec.ExitError
+	if !errors.As(probeErr, &exit) || exit.ExitCode() != 42 {
+		return "", HostProbe{}, probeErr
+	}
+	remote, err = c.DeployAgent(ctx, localPath)
+	if err != nil {
+		return "", HostProbe{}, err
+	}
+	deployed := c
+	deployed.AgentPath = remote
+	probe, err := deployed.ProbeAgent(ctx)
+	return remote, probe, err
 }
 
 func (c Client) DeployAgent(ctx context.Context, localPath string) (string, error) {
@@ -360,6 +404,95 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 	return nil, errors.New("SSH control master did not become ready")
 }
 
+// StartSharedControlMaster reuses an authenticated OpenSSH connection across
+// short-lived managed commands. OpenSSH, rather than a Pwnbridge daemon, owns
+// the bounded idle lifecycle. The caller supplies an identity-keyed private
+// directory so different installations/destinations cannot share a socket.
+func (c Client) StartSharedControlMaster(ctx context.Context, controlDir string) (*Master, error) {
+	if err := os.MkdirAll(controlDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create shared SSH control directory: %w", err)
+	}
+	if err := fsutil.ValidatePrivateDirectory(controlDir); err != nil {
+		return nil, fmt.Errorf("validate shared SSH control directory: %w", err)
+	}
+	control := filepath.Join(controlDir, "c")
+	lock, err := workspace.AcquireLock(filepath.Join(controlDir, "startup.lock"))
+	if err != nil {
+		return nil, fmt.Errorf("lock shared SSH control master startup: %w", err)
+	}
+	defer lock.Close()
+	if c.controlMasterRunning(ctx, control) {
+		return c.sharedMaster(control), nil
+	}
+	if info, statErr := os.Lstat(control); statErr == nil {
+		if info.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("refuse non-socket shared SSH control path %s", control)
+		}
+		if err := os.Remove(control); err != nil {
+			return nil, fmt.Errorf("remove stale shared SSH control socket: %w", err)
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect shared SSH control socket: %w", statErr)
+	}
+	args := []string{"-q", "-M", "-N", "-f", "-S", control,
+		"-o", "ControlMaster=yes", "-o", "ControlPersist=" + sharedControlPersist,
+		"-o", "ClearAllForwardings=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
+		"-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ExitOnForwardFailure=yes",
+		"-o", "StreamLocalBindMask=0177", c.Destination,
+	}
+	cmd := subprocess.CommandContext(ctx, c.SSH, args...)
+	cmd.Env = SafeSSHEnvironment()
+	output := boundedOutput{limit: maxSSHProbeOutputBytes}
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err != nil {
+		data, exceeded := output.snapshot()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if exceeded {
+			return nil, fmt.Errorf("shared SSH control master output exceeded %d-byte limit", maxSSHProbeOutputBytes)
+		}
+		if detail := strings.TrimSpace(string(data)); detail != "" {
+			return nil, fmt.Errorf("start shared SSH control master: %w: %s", err, detail)
+		}
+		return nil, fmt.Errorf("start shared SSH control master: %w", err)
+	}
+	if !c.controlMasterRunning(ctx, control) {
+		return nil, errors.New("shared SSH control master did not become ready")
+	}
+	return c.sharedMaster(control), nil
+}
+
+func (c Client) sharedMaster(control string) *Master {
+	client := c
+	client.ControlPath = control
+	return &Master{Client: client, ControlPath: control, Shared: true}
+}
+
+func (c Client) controlMasterRunning(ctx context.Context, control string) bool {
+	cmd := c.sshCommand(ctx, "-q", "-S", control, "-O", "check", c.Destination)
+	return cmd.Run() == nil
+}
+
+// StopSharedControlMaster explicitly closes a warm connection. A missing or
+// already-expired socket is already the desired state.
+func (c Client) StopSharedControlMaster(ctx context.Context, controlDir string) error {
+	control := filepath.Join(controlDir, "c")
+	if _, err := os.Lstat(control); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	cmd := c.sshCommand(ctx, "-q", "-S", control, "-O", "exit", c.Destination)
+	if err := cmd.Run(); err != nil {
+		if _, statErr := os.Lstat(control); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("stop shared SSH control master: %w", err)
+	}
+	return nil
+}
+
 // ConfigureBroker adds debugger-broker forwarding to an already connected
 // master. Keeping this separate from StartControlMaster lets launch setup and
 // agent probes reuse the same SSH connection.
@@ -372,7 +505,8 @@ func (m *Master) ConfigureBroker(ctx context.Context, localBroker, remoteBroker,
 }
 
 func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
-	if _, forwardErr := m.Client.runBounded(ctx, maxSSHProbeOutputBytes, "-S", m.ControlPath, "-O", "forward", "-R", m.RemoteSocket+":"+m.LocalSocket, m.Client.Destination); forwardErr != nil {
+	streamSpec := m.RemoteSocket + ":" + m.LocalSocket
+	if _, forwardErr := m.Client.runBounded(ctx, maxSSHProbeOutputBytes, "-S", m.ControlPath, "-O", "forward", "-R", streamSpec, m.Client.Destination); forwardErr != nil {
 		if localTCP == "" {
 			return fmt.Errorf("create reverse stream-local forward: %w", forwardErr)
 		}
@@ -389,6 +523,7 @@ func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
 		if parseErr != nil || portNumber < 1 || portNumber > 65535 {
 			return fmt.Errorf("SSH did not report allocated reverse port: %q", allocated)
 		}
+		m.ForwardSpec = "127.0.0.1:" + allocated + ":" + host + ":" + port
 		m.BrokerAddress = "tcp:127.0.0.1:" + allocated
 		// A bridge-networked container cannot reach a host loopback listener.
 		// When socat is available, restore the private Unix-socket endpoint.
@@ -404,6 +539,7 @@ func (m *Master) addBrokerForward(ctx context.Context, localTCP string) error {
 			m.RelayPIDFile = relayPID
 		}
 	} else {
+		m.ForwardSpec = streamSpec
 		m.BrokerAddress = "unix:" + m.RemoteSocket
 	}
 	return nil
@@ -508,9 +644,17 @@ func (m *Master) close() {
 			cmd.Env = SafeSSHEnvironment()
 			_ = cmd.Run()
 		}
-		exit := subprocess.CommandContext(cleanupContext, m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination)
-		exit.Env = SafeSSHEnvironment()
-		_ = exit.Run()
+		if m.Shared {
+			if m.ForwardSpec != "" {
+				cancel := subprocess.CommandContext(cleanupContext, m.Client.SSH, "-S", m.ControlPath, "-O", "cancel", "-R", m.ForwardSpec, m.Client.Destination)
+				cancel.Env = SafeSSHEnvironment()
+				_ = cancel.Run()
+			}
+		} else {
+			exit := subprocess.CommandContext(cleanupContext, m.Client.SSH, "-S", m.ControlPath, "-O", "exit", m.Client.Destination)
+			exit.Env = SafeSSHEnvironment()
+			_ = exit.Run()
+		}
 	}
 	if m.process != nil {
 		if m.process.Process != nil {

@@ -10,7 +10,7 @@ editor, Git, local tools
         │
 local challenge ─── Mutagen two-way-safe ─────► remote workspace
         │                                             │
-pwnbridge ───────── dedicated OpenSSH master ───► static agent
+pwnbridge ───────── bounded warm OpenSSH master ─► static agent
         │                                             ├─ host process
         ├─ PTY proxy ◄──── Mosh or SSH PTY ───────────┤
         │                                             └─ container process
@@ -32,7 +32,8 @@ The client owns:
 - strict configuration and XDG state;
 - workspace identity, locks, and active-session leases;
 - the isolated Mutagen daemon and synchronization barriers;
-- a dedicated OpenSSH control master for each active execution session;
+- an owner-private OpenSSH control master shared by nearby invocations and
+  bounded by a two-minute idle timeout;
 - the terminal broker and provider selection;
 - the authoritative runtime specification for debugger panes.
 
@@ -213,12 +214,24 @@ for every other type. Inspection does not resume or mutate synchronization.
 
 One-shot `run` performs the same pre/post barriers without prompt markers.
 
+For an established session whose stored configuration fingerprint still
+matches, startup goes directly through resume, flush, and complete health
+inspection. Version gating, daemon readiness, and session discovery remain on
+the creation/recovery path. Only a definite missing-session response may clear
+the stale identifier and recreate it; conflicts and every other unhealthy
+state remain execution-blocking.
+
 ## Predictive inline shell and optional Mosh
 
 Interactive host-scope shells default to `shell_transport = "auto"`. Pwnbridge
 runs the ordinary SSH PTY inline and predicts printable prompt input locally.
 Matching remote terminal echo is reconciled out of the stream; any mismatch,
 control sequence, readline redraw, or program output remains remote-authoritative.
+Bracketed-paste delimiters are recognized across input chunks; the complete
+paste region is left remote-authoritative because Readline inserts and may
+style/redisplay it as one active region. Newlines inside that region are bytes,
+not command submissions; only Enter after the closing delimiter starts a
+barrier.
 This byte-stream design preserves the surrounding terminal history and avoids
 the viewport clear inherent in a screen-state protocol. `shell_transport =
 "ssh"` uses the same path with prediction disabled.
@@ -243,20 +256,26 @@ and all noninteractive operations always use OpenSSH.
 
 ## OpenSSH transport
 
-Pwnbridge launches a private control master with agent/X11 forwarding disabled,
-no persistent control socket, and keepalives:
+Managed shell/run sessions launch or reuse an identity-keyed control master in
+an owner-private cache directory. OpenSSH owns its bounded idle lifecycle;
+Pwnbridge adds no daemon. Agent/X11 forwarding remain disabled:
 
 ```text
-ssh -M -N -S <short-private-path>
-    -o ControlMaster=yes -o ControlPersist=no
+ssh -M -N -f -S <short-private-path>
+    -o ControlMaster=yes -o ControlPersist=2m
     -o ClearAllForwardings=yes -o ExitOnForwardFailure=yes
     -o ForwardAgent=no -o ForwardX11=no
     -o ServerAliveInterval=15 -o ServerAliveCountMax=3
 ```
 
-The system executable and ordinary SSH configuration remain authoritative.
-Startup readiness is checked with `ssh -O check`, not a fixed sleep. Each shell,
-process, or debugger pane uses a separate channel through the same master.
+The socket identity includes the local installation/workspace, configured host,
+and destination. Startup is serialized across processes and readiness is
+checked with `ssh -O check`, not a fixed sleep. Each shell, process, or debugger
+pane uses a separate channel through the same master. Per-invocation brokers,
+tokens, records, remote session directories, and reverse forwards are never
+shared; cleanup cancels the exact forward it created. `stop` and `clean` close
+the warm master explicitly, while ordinary completion lets OpenSSH expire it
+after two idle minutes. Doctor/recovery probes retain ephemeral private masters.
 
 The transport prefers reverse stream-local forwarding from the private remote
 session socket to the Mac broker socket. If the server disables stream-local
@@ -287,11 +306,13 @@ stack is covered by model/program integration and bounded Unicode fuzz tests so
 wide/joining grapheme fixes cannot silently regress inline width or input
 restoration.
 
-The Linux agent is built with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`. Deployment
-probes the remote platform, uploads to a unique temporary file, verifies SHA-256
-remotely, chmods, and atomically places it under a protocol/content-addressed
-directory. Reuse verifies the digest again. Old unused agents are pruned while
-live process executables are retained.
+The Linux agent is built with `CGO_ENABLED=0 GOOS=linux GOARCH=amd64`. The hot
+path verifies the cached content-addressed executable's SHA-256 and executes its
+structured platform/protocol probe in one bounded SSH channel. Cache absence or
+replacement falls back to a unique temporary upload, remote SHA-256 check,
+chmod, and atomic placement. Agent preparation runs beside the independent
+Mutagen barrier after SSH authentication; both must complete. Old unused agents
+are pruned while live process executables are retained.
 
 ## PTY behavior
 
@@ -300,8 +321,9 @@ Interactive channels use a local PTY proxy around Mosh or remote
 
 - local raw mode is restored on every exit path;
 - `SIGWINCH` propagates rows and columns;
-- Ctrl-C, Ctrl-Z, Ctrl-D, readline, job control, bracketed paste, and alternate
-  screens remain byte-oriented;
+- Ctrl-C, Ctrl-Z, Ctrl-D, readline, job control, and alternate screens remain
+  byte-oriented; bracketed paste remains byte-faithful and is not locally
+  predicted or split at embedded newlines;
 - the marker parser tolerates every input chunk boundary and never treats a
   marker without the private nonce as trusted;
 - transport failure immediately releases the local terminal.

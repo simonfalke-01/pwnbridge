@@ -120,6 +120,50 @@ func TestEchoPredictorLeavesControlsAndRemoteCorrectionsAuthoritative(t *testing
 	}
 }
 
+func TestEchoPredictorLeavesBracketedPasteRedisplayAuthoritative(t *testing.T) {
+	var output bytes.Buffer
+	predictor := &echoPredictor{out: &output}
+	predictor.Predict([]byte("before "))
+	_, _ = predictor.Write([]byte("before "))
+	for _, chunk := range []string{"\x1b[2", "00~pasted", "\ntext\x1b[20", "1~"} {
+		predictor.Predict([]byte(chunk))
+	}
+	if got := output.String(); got != "before " {
+		t.Fatalf("paste body was locally predicted: %q", got)
+	}
+	remote := []byte("\x1b[7mpasted\r\ntext\x1b[27m")
+	if _, err := predictor.Write(remote); err != nil {
+		t.Fatal(err)
+	}
+	predictor.Predict([]byte(" after"))
+	_, _ = predictor.Write([]byte(" after"))
+	if got := output.String(); got != "before "+string(remote)+" after" {
+		t.Fatalf("Readline redisplay was duplicated or hidden: %q", got)
+	}
+}
+
+func TestInputControllerDoesNotTreatPastedNewlinesAsSubmissions(t *testing.T) {
+	var terminal bytes.Buffer
+	barriers := 0
+	controller := &inputController{
+		pty: &terminal,
+		barrier: func(context.Context) error {
+			barriers++
+			return nil
+		},
+		err: &bytes.Buffer{}, atPrompt: true,
+	}
+	for _, chunk := range []string{"\x1b[20", "0~first\nsecond", "\x1b[201", "~\r"} {
+		controller.Input(context.Background(), []byte(chunk))
+	}
+	if got := terminal.String(); got != "\x1b[200~first\nsecond\x1b[201~\r" {
+		t.Fatalf("paste bytes changed: %q", got)
+	}
+	if barriers != 1 {
+		t.Fatalf("paste triggered %d barriers, want one final submission", barriers)
+	}
+}
+
 func TestInputControllerPreservesPasteWhenBarrierFails(t *testing.T) {
 	var terminal, diagnostics bytes.Buffer
 	fail := true

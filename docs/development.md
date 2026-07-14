@@ -71,8 +71,11 @@ Package tests include:
 - monotonic deterministic-archive byte/item progress, TTY-only throttled
   recovery status, partial cancellation reports, checked/total JSON, maximum
   snapshot responses, and bounded SSH management/forwarding/SCP floods;
-- OpenSSH/scp and Mosh argv, agent deployment, stream-local and TCP/socat fallback;
-- PTY marker chunk boundaries and terminal restoration;
+- OpenSSH/scp and Mosh argv, bounded shared-master reuse/explicit shutdown,
+  exact forward cancellation, fused verified agent preparation, stream-local
+  and TCP/socat fallback;
+- PTY marker and bracketed-paste chunk boundaries, paste redisplay authority,
+  multiline paste submission barriers, and terminal restoration;
 - broker authentication, shell barriers, rate/pane limits, lifecycle, and runtime authority;
 - fake Zellij/tmux/WezTerm/Kitty/iTerm/Terminal/custom provider lifecycle,
   exact inventory/protocol limits, output floods, and final diagnostic tails;
@@ -99,7 +102,7 @@ Individual scenarios:
 | Script | Coverage |
 |---|---|
 | `lima.sh` | checked host registration, real ret2win, x86-64, artifacts, conflict previews/resolution/recovery/pruning/spaces, root deletion |
-| `lima-shell.sh` | SSH save-before-Enter, prompt artifacts, Ctrl-C/Z/D, readline, resize |
+| `lima-shell.sh` | warm-master reuse/shutdown, SSH save-before-Enter, single-render bracketed paste, prompt artifacts, Ctrl-C/Z/D, readline, resize |
 | `lima-mosh.sh` | explicit roaming Mosh, no exit banner, remote pre/post barriers, artifacts, resize |
 | `lima-disconnect.sh` | forced SSH-master loss, terminal restoration, reconnect, preserved data |
 | `lima-gdb.sh` | debug, attach, API, concurrent panes, selectable host provider |

@@ -47,6 +47,7 @@ type HealthReport struct {
 
 type Engine interface {
 	Ensure(context.Context, Spec, *workspace.State) error
+	Prepare(context.Context, Spec, *workspace.State) (HealthReport, error)
 	Resume(context.Context, string) error
 	Barrier(context.Context, string) (HealthReport, error)
 	Status(context.Context, string) (HealthReport, error)
@@ -203,6 +204,33 @@ func (r CommandRunner) effectiveDataDir() (string, error) {
 
 type Mutagen struct{ Runner Runner }
 
+// Prepare establishes the execution barrier with the minimum safe hot path.
+// A matching stored session goes directly through resume, flush, and complete
+// health inspection. Only a definite missing-session response falls back to
+// version-gated creation; unhealthy sessions remain blocking errors.
+func (m Mutagen) Prepare(ctx context.Context, spec Spec, state *workspace.State) (HealthReport, error) {
+	fingerprint := Fingerprint(spec)
+	if state.MutagenIdentifier != "" && state.SyncFingerprint == fingerprint {
+		identifier := state.MutagenIdentifier
+		if err := m.Resume(ctx, identifier); err == nil {
+			report, barrierErr := m.Barrier(ctx, identifier)
+			if barrierErr == nil || !missingSessionError(barrierErr) {
+				return report, barrierErr
+			}
+		} else if !missingSessionError(err) {
+			return HealthReport{}, err
+		}
+		state.MutagenIdentifier, state.SyncFingerprint = "", ""
+	}
+	if err := m.Ensure(ctx, spec, state); err != nil {
+		return HealthReport{}, err
+	}
+	if err := m.Resume(ctx, state.MutagenIdentifier); err != nil {
+		return HealthReport{}, err
+	}
+	return m.Barrier(ctx, state.MutagenIdentifier)
+}
+
 func (m Mutagen) CheckVersion(ctx context.Context) error {
 	out, err := m.Runner.Run(ctx, "version")
 	if err != nil {
@@ -242,8 +270,7 @@ func (m Mutagen) Ensure(ctx context.Context, spec Spec, state *workspace.State) 
 					return err
 				}
 			} else {
-				message := strings.ToLower(err.Error())
-				if !strings.Contains(message, "not found") && !strings.Contains(message, "did not match") {
+				if !missingSessionError(err) {
 					return err
 				}
 			}
@@ -255,8 +282,7 @@ func (m Mutagen) Ensure(ctx context.Context, spec Spec, state *workspace.State) 
 				return nil
 			}
 			if err != nil {
-				message := strings.ToLower(err.Error())
-				if !strings.Contains(message, "not found") && !strings.Contains(message, "did not match") {
+				if !missingSessionError(err) {
 					return err
 				}
 			}
@@ -294,6 +320,18 @@ func (m Mutagen) Ensure(ctx context.Context, spec Spec, state *workspace.State) 
 	}
 	state.MutagenIdentifier, state.SyncFingerprint = identifier, fingerprint
 	return nil
+}
+
+func missingSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var unhealthy *UnhealthyError
+	if errors.As(err, &unhealthy) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") || strings.Contains(message, "did not match")
 }
 
 func (m Mutagen) waitReady(ctx context.Context) error {

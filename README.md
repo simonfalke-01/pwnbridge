@@ -22,8 +22,11 @@ shown, remote artifacts are synchronized back to the Mac.
 
 - A bidirectional, conflict-safe workspace powered by external Mutagen 0.18.1.
 - An inline SSH PTY with pwnbridge predictive echo for instant typing,
-  preserved terminal history, signals, job control, readline, resize, and
-  interactive programs; explicit Mosh remains available for roaming sessions.
+  single-render bracketed paste, preserved terminal history, signals, job
+  control, readline, resize, and interactive programs; explicit Mosh remains
+  available for roaming sessions.
+- A bounded warm OpenSSH control connection for low-latency repeated `pb`
+  commands, with per-command barriers, agent verification, and debugger state.
 - Structural argv execution with ordinary remote exit statuses.
 - Transparent pwntools `gdb.debug()`, `gdb.attach()`, and `api=True` support.
 - First-class local Zellij and tmux panes, plus WezTerm, Kitty, iTerm2,

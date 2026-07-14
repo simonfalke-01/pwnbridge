@@ -84,6 +84,17 @@ expect {
 }
 expect -re {[$#] $}
 
+send -- "\033\[200~: # PASTE-VISUAL-ONCE\033\[201~\r"
+expect {
+    -re {[$#] $} {}
+    timeout { puts stderr "bracketed paste did not return a prompt"; exit 1 }
+}
+set pasted $expect_out(buffer)
+if {[regexp -all -- {PASTE-VISUAL-ONCE} $pasted] != 1} {
+    puts stderr "bracketed paste was not rendered exactly once"
+    exit 1
+}
+
 send -- "printf '\\033\[?1049hALTERNATE-SCREEN-OK\\033\[?1049l'\r"
 expect {
     -re {ALTERNATE-SCREEN-OK} {}

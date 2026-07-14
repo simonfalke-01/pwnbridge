@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/simonfalke-01/pwnbridge/internal/subprocess"
+	"github.com/simonfalke-01/pwnbridge/internal/workspace"
 )
 
 type fakeRunner struct {
@@ -47,6 +48,63 @@ func TestBarrierValidatesAfterFlush(t *testing.T) {
 	}
 	if got := strings.Join(runner.calls[0], " "); got != "sync flush id" {
 		t.Fatalf("first command: %s", got)
+	}
+}
+
+func TestPrepareUsesDirectBarrierForMatchingStoredSession(t *testing.T) {
+	spec := Spec{}
+	state := workspace.State{MutagenIdentifier: "sync_existing", SyncFingerprint: Fingerprint(spec)}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{out: "resumed"},
+		{out: "flushed"},
+		{out: `[{"paused":false,"status":"watching","alpha":{"connected":true},"beta":{"connected":true}}]`},
+	}}
+	report, err := (Mutagen{Runner: runner}).Prepare(context.Background(), spec, &state)
+	if err != nil || !report.Healthy {
+		t.Fatalf("prepare = %#v, %v", report, err)
+	}
+	want := []string{"sync resume sync_existing", "sync flush sync_existing", "sync list --template {{ json . }} sync_existing"}
+	if len(runner.calls) != len(want) {
+		t.Fatalf("prepare calls = %#v", runner.calls)
+	}
+	for i := range want {
+		if got := strings.Join(runner.calls[i], " "); got != want[i] {
+			t.Fatalf("prepare call %d = %q, want %q", i, got, want[i])
+		}
+	}
+}
+
+func TestPrepareDoesNotRecreateUnhealthyStoredSession(t *testing.T) {
+	spec := Spec{}
+	state := workspace.State{MutagenIdentifier: "sync_existing", SyncFingerprint: Fingerprint(spec)}
+	runner := &fakeRunner{responses: []fakeResponse{
+		{out: "resumed"},
+		{out: "flushed"},
+		{out: `[{"paused":false,"status":"watching","conflicts":[{"path":"not found.txt"}]}]`},
+	}}
+	_, err := (Mutagen{Runner: runner}).Prepare(context.Background(), spec, &state)
+	if err == nil || len(runner.calls) != 3 {
+		t.Fatalf("unhealthy prepare recreated session: calls=%#v err=%v", runner.calls, err)
+	}
+}
+
+func TestPrepareRecreatesOnlyDefinitelyMissingStoredSession(t *testing.T) {
+	spec := Spec{}
+	state := workspace.State{MutagenIdentifier: "sync_missing", SyncFingerprint: Fingerprint(spec)}
+	created := "sync_QPHUoxd7sGevWnZNPQVNuwGvbkHi2ON3Jhz0KCZveJG"
+	runner := &fakeRunner{responses: []fakeResponse{
+		{err: errors.New("did not match any sessions")},
+		{out: "0.18.1"},
+		{out: "started"},
+		{out: "[]"},
+		{out: "Created session " + created},
+		{out: "resumed"},
+		{out: "flushed"},
+		{out: `[{"paused":false,"status":"watching","alpha":{"connected":true},"beta":{"connected":true}}]`},
+	}}
+	report, err := (Mutagen{Runner: runner}).Prepare(context.Background(), spec, &state)
+	if err != nil || !report.Healthy || state.MutagenIdentifier != created {
+		t.Fatalf("missing-session recovery = %#v, state=%#v, err=%v", report, state, err)
 	}
 }
 

@@ -123,7 +123,13 @@ Pwnbridge uses the system OpenSSH client and never:
 - forwards the SSH authentication agent;
 - forwards X11;
 - exposes a public custom daemon;
-- persists its control master after session cleanup.
+- leaves a control master running indefinitely.
+
+Nearby managed invocations may reuse an owner-private, identity-keyed OpenSSH
+master for up to two idle minutes. OpenSSH owns that timeout. Pwnbridge shares
+no broker token or remote session state across commands, cancels each exact
+reverse forward during cleanup, and explicitly exits the warm master on
+`stop`/`clean`. The master never forwards the authentication agent or X11.
 
 Keys, ProxyJump, `Match`, Keychain, FIDO/hardware keys, and host verification
 remain OpenSSH's responsibility. Pwnbridge uses structured client argv; remote
@@ -134,9 +140,9 @@ maintenance commands single-quote variable paths.
 The Linux agent is a static amd64 binary installed only below the remote user's
 data directory. Deployment:
 
-1. probes Linux/amd64 through ordinary SSH;
-2. hashes the local asset;
-3. verifies any cached copy's remote SHA-256 before reuse;
+1. hashes the local asset;
+2. verifies any cached copy's remote SHA-256 before executing it;
+3. probes that verified executable for Linux/amd64 and protocol compatibility;
 4. uploads to a unique mode-private temporary path;
 5. verifies SHA-256 remotely;
 6. atomically moves into a protocol/content-addressed directory;

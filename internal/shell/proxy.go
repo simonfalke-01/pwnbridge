@@ -200,6 +200,7 @@ type echoPredictor struct {
 	out      io.Writer
 	expected []byte
 	escape   int
+	paste    bracketedPasteTracker
 }
 
 func (p *echoPredictor) Predict(data []byte) {
@@ -207,6 +208,7 @@ func (p *echoPredictor) Predict(data []byte) {
 	defer p.mu.Unlock()
 	local := make([]byte, 0, len(data))
 	for _, value := range data {
+		pasteByte := p.paste.Feed(value)
 		switch p.escape {
 		case 1:
 			if value == '[' {
@@ -223,6 +225,14 @@ func (p *echoPredictor) Predict(data []byte) {
 		}
 		if value == 0x1b {
 			p.escape = 1
+			continue
+		}
+		// Readline consumes bracketed paste as one insertion and is free to
+		// repaint it with cursor/active-region attributes. Predicting the body
+		// as ordinary typing would leave both that local copy and Readline's
+		// authoritative repaint visible. Keep the exact paste region remote-
+		// authoritative while retaining prediction for surrounding typing.
+		if pasteByte {
 			continue
 		}
 		if value >= 0x20 && value != 0x7f {
@@ -261,7 +271,44 @@ func (p *echoPredictor) Reset() {
 	p.mu.Lock()
 	p.expected = nil
 	p.escape = 0
+	p.paste = bracketedPasteTracker{}
 	p.mu.Unlock()
+}
+
+const (
+	bracketedPasteBegin = "\x1b[200~"
+	bracketedPasteEnd   = "\x1b[201~"
+)
+
+// bracketedPasteTracker recognizes terminal paste delimiters across arbitrary
+// read boundaries. Feed reports true for both delimiters and every byte in the
+// enclosed region. Mismatched prefixes are harmless because neither delimiter
+// contains a newline, which is the only byte for which inputController uses
+// the classification to make a control-flow decision.
+type bracketedPasteTracker struct {
+	active bool
+	match  int
+}
+
+func (t *bracketedPasteTracker) Feed(value byte) bool {
+	wasActive := t.active
+	delimiter := bracketedPasteBegin
+	if t.active {
+		delimiter = bracketedPasteEnd
+	}
+	if value == delimiter[t.match] {
+		t.match++
+		if t.match == len(delimiter) {
+			t.active = !t.active
+			t.match = 0
+		}
+		return true
+	}
+	t.match = 0
+	if value == delimiter[0] {
+		t.match = 1
+	}
+	return wasActive || t.active || t.match > 0
 }
 
 type ExitError struct{ Code int }
@@ -279,6 +326,7 @@ type inputController struct {
 	syncing   bool
 	pending   []byte
 	predictor *echoPredictor
+	paste     bracketedPasteTracker
 }
 
 func (c *inputController) Input(ctx context.Context, data []byte) {
@@ -294,7 +342,8 @@ func (c *inputController) Input(ctx context.Context, data []byte) {
 		return
 	}
 	for index, value := range data {
-		if value != '\r' && value != '\n' {
+		pasteByte := c.paste.Feed(value)
+		if pasteByte || value != '\r' && value != '\n' {
 			continue
 		}
 		if c.predictor != nil {
@@ -332,6 +381,7 @@ func (c *inputController) BeginPrompt() {
 	c.mu.Lock()
 	c.syncing = true
 	c.atPrompt = false
+	c.paste = bracketedPasteTracker{}
 	c.mu.Unlock()
 }
 

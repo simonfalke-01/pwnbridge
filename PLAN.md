@@ -173,7 +173,7 @@ Behavioral rules:
 - The nearest ancestor `.pwnbridge.toml` defines the project; otherwise the current directory is the project root.
 - Git roots are not selected implicitly.
 - `run` transmits argv structurally. Pipelines require an explicit `bash -lc`.
-- `stop` performs a final barrier, closes dependent panes, and pauses synchronization.
+- `stop` performs a final barrier, closes dependent panes, pauses synchronization, and exits the bounded warm OpenSSH master.
 - `clean` terminates pwnbridge session state but preserves both workspaces.
 - Only `clean --remote`, with confirmation or `--yes`, deletes the remote workspace.
 - Conflict resolution backs up the losing version outside the synchronized tree before changing it.
@@ -477,13 +477,14 @@ While Python, GDB, an inferior, curses program, or another foreground process ow
 
 ### 9.1 OpenSSH control plane
 
-Use a dedicated pwnbridge-owned control master per active host:
+Use an owner-private, identity-keyed control master shared by nearby managed
+invocations and bounded by OpenSSH's idle timer:
 
 ```text
-ssh -M -N
+ssh -M -N -f
     -S <short-private-control-path>
     -o ControlMaster=yes
-    -o ControlPersist=no
+    -o ControlPersist=2m
     -o ClearAllForwardings=yes
     -o ServerAliveInterval=15
     -o ServerAliveCountMax=3
@@ -501,8 +502,10 @@ ssh -M -N
   `ssh -S ... -tt -e none` channels; plain SSH disables prediction.
 - Explicit Mosh uses `--predict=always` when its UDP path, `mosh-server`, and
   authenticated barrier bridge are ready.
-- Keep the master until the final shell, run, or pane lease exits.
-- Cancel forwards and issue `ssh -O exit` on clean shutdown.
+- Keep broker tokens, remote session state, leases, and reverse forwards
+  per invocation; cancel the exact forward when its owning session exits.
+- Let OpenSSH retain only the authenticated base connection for two idle
+  minutes, and issue `ssh -O exit` on `stop` or `clean`.
 - Restore the local terminal immediately if transport fails.
 - Let Mutagen maintain its own system-SSH connection rather than coupling it to UI channels.
 

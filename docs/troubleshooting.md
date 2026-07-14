@@ -140,7 +140,16 @@ Pwnbridge does not bypass host-key prompts, key passphrases, hardware-token
 touch, `ProxyJump`, or `Match` rules. Resolve interactive authentication before
 expecting unattended `pwnbridge run`.
 
-If a control master fails, inspect server policy for TCP/stream-local
+Managed shell/run commands keep their authenticated OpenSSH master warm for two
+idle minutes, so nearby `pb` invocations avoid repeated key exchange and
+authentication. The socket is owner-private and identity-keyed below the
+Pwnbridge cache (or a short owner-private temporary path when required by Unix
+socket limits). `pwnbridge stop` and `pwnbridge clean` close it explicitly; it
+otherwise expires automatically. If a stale control path is reported, first
+ensure no Pwnbridge command for that project is active, then run
+`pwnbridge stop`.
+
+If broker forwarding fails, inspect server policy for TCP/stream-local
 forwarding. Normal non-GDB commands need SSH but not broker forwarding. Use
 explicit remote multiplexer scope if all reverse forwarding is prohibited.
 

@@ -106,6 +106,44 @@ func TestSmallProtocolProbesBoundOutputAndInheritedDescriptors(t *testing.T) {
 	})
 }
 
+func TestPrepareAgentVerifiesAndProbesCachedAssetInOneChannel(t *testing.T) {
+	dir := t.TempDir()
+	asset := filepath.Join(dir, "agent")
+	content := []byte("verified agent")
+	if err := os.WriteFile(asset, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "calls")
+	ssh := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$PWNBRIDGE_TRANSPORT_TEST_LOG"
+printf '{"protocol":4,"os":"linux","architecture":"amd64","home":"/home/pwner"}'
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_LOG", logPath)
+	remote, probe, err := (Client{SSH: ssh, Destination: "fake"}).PrepareAgent(context.Background(), asset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
+	wantRemote := "~/.local/share/pwnbridge/agents/4/" + digest + "/pwnbridge-agent"
+	if remote != wantRemote || probe.Protocol != 4 || probe.Architecture != "amd64" {
+		t.Fatalf("prepared agent = %q, %#v", remote, probe)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Count(strings.TrimSpace(string(data)), "\n") + 1; lines != 1 {
+		t.Fatalf("cached preparation used %d SSH channels: %s", lines, data)
+	}
+	if !strings.Contains(string(data), digest) || !strings.Contains(string(data), "sha256sum") {
+		t.Fatalf("cached preparation omitted digest verification: %s", data)
+	}
+}
+
 func TestManagementResponsesAreBoundedAndAcceptMaximumSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	ssh := filepath.Join(dir, "ssh")
@@ -566,6 +604,90 @@ exit 0
 	defer master.Close()
 	if master.BrokerAddress != "" || master.ControlPath == "" {
 		t.Fatalf("unexpected control-only master: %#v", master)
+	}
+}
+
+func TestSharedControlMasterStartsOnceAndStopsExplicitly(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	state := filepath.Join(dir, "running")
+	control := filepath.Join(dir, "control", "c")
+	logPath := filepath.Join(dir, "calls")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$PWNBRIDGE_TRANSPORT_TEST_LOG"
+case " $* " in
+  *" -O check "*) test -f "$PWNBRIDGE_TRANSPORT_TEST_STATE" ;;
+  *" -O exit "*) rm -f "$PWNBRIDGE_TRANSPORT_TEST_STATE" "$PWNBRIDGE_TRANSPORT_TEST_CONTROL" ;;
+  *" -M -N -f "*) : > "$PWNBRIDGE_TRANSPORT_TEST_STATE"; : > "$PWNBRIDGE_TRANSPORT_TEST_CONTROL" ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_LOG", logPath)
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_STATE", state)
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_CONTROL", control)
+	client := Client{SSH: ssh, Destination: "fake"}
+	results := make(chan error, 8)
+	for range 8 {
+		go func() {
+			master, err := client.StartSharedControlMaster(context.Background(), filepath.Dir(control))
+			if err == nil && (!master.Shared || master.ControlPath != control) {
+				err = fmt.Errorf("unexpected shared master: %#v", master)
+			}
+			if master != nil {
+				_ = master.Close()
+			}
+			results <- err
+		}()
+	}
+	for range 8 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starts := strings.Count(string(data), " -M -N -f "); starts != 1 {
+		t.Fatalf("shared master starts = %d: %s", starts, data)
+	}
+	if !strings.Contains(string(data), "ControlPersist=2m") || !strings.Contains(string(data), "ForwardAgent=no") {
+		t.Fatalf("shared master safety options missing: %s", data)
+	}
+	if err := client.StopSharedControlMaster(context.Background(), filepath.Dir(control)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(state); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("shared master was not stopped: %v", err)
+	}
+}
+
+func TestSharedMasterCloseCancelsOnlyItsForward(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	logPath := filepath.Join(dir, "calls")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PWNBRIDGE_TRANSPORT_TEST_LOG\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PWNBRIDGE_TRANSPORT_TEST_LOG", logPath)
+	master := &Master{
+		Client:      Client{SSH: ssh, Destination: "fake"},
+		ControlPath: "/private/control", Shared: true,
+		ForwardSpec: "/remote/broker.sock:/local/broker.sock",
+	}
+	if err := master.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "-O cancel -R /remote/broker.sock:/local/broker.sock fake") || strings.Contains(got, "-O exit") {
+		t.Fatalf("shared close affected the wrong master state: %s", got)
 	}
 }
 

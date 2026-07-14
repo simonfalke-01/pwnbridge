@@ -75,7 +75,8 @@ it.
 ### `pwnbridge stop`
 
 Signal live Pwnbridge clients for this workspace, wait for pane/runtime cleanup,
-perform a final barrier, and pause Mutagen.
+perform a final barrier, pause Mutagen, and close the bounded warm OpenSSH
+master.
 
 ### `pwnbridge clean [--remote --yes]`
 
@@ -83,7 +84,8 @@ Stop clients and terminate Pwnbridge synchronization metadata. Local and remote
 roots remain by default. A private local lifecycle record remembers the retained
 remote root for safe host retirement. Both `--remote` and `--yes` are required
 to delete the remote workspace; only a successful remote deletion clears that
-retention marker. Conflict-recovery copies remain separately cataloged.
+retention marker. The warm OpenSSH master is closed in either mode.
+Conflict-recovery copies remain separately cataloged.
 
 ### `pwnbridge init`
 
