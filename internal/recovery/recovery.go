@@ -247,7 +247,7 @@ func copyRegular(source *os.Root, sourcePath string, expected os.FileInfo, desti
 	}
 	defer in.Close()
 	opened, err := in.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(expected, opened) || opened.Size() != expected.Size() {
+	if err != nil || !opened.Mode().IsRegular() || !sameObservedFile(expected, opened) {
 		return fmt.Errorf("source file %q changed while it was opened", sourcePath)
 	}
 	out, err := destination.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, expected.Mode().Perm())
