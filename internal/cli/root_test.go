@@ -90,6 +90,29 @@ func TestPBIsAFlagTransparentRunAlias(t *testing.T) {
 	}
 }
 
+func TestPaneExecutableResolvesPBToPwnbridge(t *testing.T) {
+	dir := t.TempDir()
+	pwnbridge := filepath.Join(dir, "pwnbridge")
+	if err := os.WriteFile(pwnbridge, []byte("client"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pb := filepath.Join(dir, "pb")
+	if err := os.Symlink("pwnbridge", pb); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolvePaneExecutable(pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(pwnbridge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("pane executable = %q, want %q", got, want)
+	}
+}
+
 func TestImplicitWorkspaceGuardBlocksAccidentalLargeDirectory(t *testing.T) {
 	root := t.TempDir()
 	large := filepath.Join(root, "movie.mkv")

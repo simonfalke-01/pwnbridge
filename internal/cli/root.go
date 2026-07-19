@@ -437,7 +437,7 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 	}
 	recordPath = filepath.Join(a.Paths.State, "sessions", id+".json")
 	leasePath = recordPath + ".lease"
-	executable, err := os.Executable()
+	executable, err := paneExecutable()
 	if err != nil {
 		return nil, err
 	}
@@ -511,6 +511,26 @@ func (a *App) startSession(ctx context.Context, p *projectContext, progress *lau
 		return nil, closeErr
 	}
 	return &activeSession{app: a, project: p, ID: id, Token: token, Nonce: nonce, RemoteDir: remoteDir, RuntimeDir: runtimeDir, RecordPath: recordPath, Record: record, Broker: b, Master: master, Probe: probe, Lease: lease}, nil
+}
+
+// paneExecutable returns the real client executable rather than the path used
+// to invoke it. In particular, pb is normally a symlink to pwnbridge. Recording
+// the symlink would make a debugger pane run `pb __pane ...`, which the client
+// interprets as a one-shot remote command instead of its internal pane helper.
+func paneExecutable() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return resolvePaneExecutable(executable)
+}
+
+func resolvePaneExecutable(executable string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", fmt.Errorf("resolve pwnbridge executable %s: %w", executable, err)
+	}
+	return resolved, nil
 }
 
 func (s *activeSession) runtimeSpec() protocol.RuntimeSpec {
