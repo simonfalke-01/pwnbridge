@@ -1,10 +1,10 @@
 # Audit State
 
-- Cycle: 3
-- Last pushed hash: `a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d` (`origin/main`)
+- Cycle: 4
+- Last pushed hash: `5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46` (`origin/main`)
 - Working branch: `main`
-- Item in progress: `[PWB-003] Correct container cwd translation for host workspaces under /work`
-- Working tree at session start: clean after PWB-002; branch matches `origin/main`
+- Item in progress: full audit 2; substantive pool exhausted after PWB-003
+- Working tree at session start: clean after PWB-003; branch matches `origin/main`
 - Build: GREEN (`GOTOOLCHAIN=go1.26.5 make build`)
 - Tests: GREEN (`GOTOOLCHAIN=go1.26.5 make verify` and `make test-race`)
 - Lint/type-check: GREEN (`make verify` includes `go vet ./...`)
@@ -21,4 +21,4 @@
   - security: `make security`
   - fuzz smoke: `make fuzz-smoke`
   - run: `go run ./cmd/pwnbridge --help`
-- Recent-cycle tier log: Cycle 1 HIGH / ROBUSTNESS; Cycle 2 HIGH / SECURITY
+- Recent-cycle tier log: Cycle 1 HIGH / ROBUSTNESS; Cycle 2 HIGH / SECURITY; Cycle 3 MEDIUM / CORRECTNESS

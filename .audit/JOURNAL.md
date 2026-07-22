@@ -19,3 +19,12 @@ Append-only record of completed substantive cycles.
 - Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestCheckToolchainRejectsCVE202639822`, `TestCheckToolchainAcceptsFixedReleases`
 - Senior-review self-check: worth doing because the vulnerable standard-library calls sit directly in the data-recovery confinement boundary, and a module minimum alone cannot reject the later affected Go 1.26 patch range.
 - Commit:      a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d "security(toolchain): reject CVE-2026-39822 builds"     Pushed: origin/main @ a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d
+
+## Cycle 3 — 2026-07-22T23:07:39+08:00
+- Item:        [PWB-003] Correct container cwd translation for host workspaces under /work       Tier: MEDIUM   Dimension: CORRECTNESS
+- Why it mattered: Users with a supported absolute remote workspace beneath `/work` received a nonexistent container cwd, so every container command from that workspace failed before execution.
+- Evidence:    `TestContainerCommandTranslatesHostWorkspaceUnderContainerWorkdirPrefix` failed before the fix with `-w /work/chal/sub` instead of the mounted `/work/sub`.
+- Change:      Prioritized translation through the authoritative host workspace mount before recognizing already-container-native workdir paths; retained the existing debugger cwd behavior outside that mount.
+- Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestContainerCommandTranslatesHostWorkspaceUnderContainerWorkdirPrefix`, `TestContainerCommandPreservesContainerCwd`
+- Senior-review self-check: worth doing because an explicitly supported remote workspace root could make the entire optional container runtime unusable, and the fix resolves the namespace ambiguity with the authoritative mount mapping.
+- Commit:      5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46 "fix(runtime): map host workspace cwd before container paths"     Pushed: origin/main @ 5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46
