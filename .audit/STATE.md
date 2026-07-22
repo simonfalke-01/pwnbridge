@@ -1,15 +1,15 @@
 # Audit State
 
-- Cycle: 2
-- Last pushed hash: `c10f12dc5713e8c134e4634041674d70760ec2da` (`origin/main`)
+- Cycle: 3
+- Last pushed hash: `a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d` (`origin/main`)
 - Working branch: `main`
-- Item in progress: `[PWB-002] Refuse binaries built with Go releases affected by CVE-2026-39822`
-- Working tree at session start: reconciled and clean after PWB-001; branch matches `origin/main`
+- Item in progress: `[PWB-003] Correct container cwd translation for host workspaces under /work`
+- Working tree at session start: clean after PWB-002; branch matches `origin/main`
 - Build: GREEN (`GOTOOLCHAIN=go1.26.5 make build`)
 - Tests: GREEN (`GOTOOLCHAIN=go1.26.5 make verify` and `make test-race`)
 - Lint/type-check: GREEN (`make verify` includes `go vet ./...`)
 - Format: GREEN (`make verify` includes `make fmt-check`)
-- Security: RED under local Go 1.26.3 due reachable GO-2026-4970 / CVE-2026-39822; CI and releases use fixed Go 1.26.5
+- Security: GREEN under fixed Go 1.26.5; known-affected source builds now fail closed at startup
 - Exact commands:
   - build: `make build`
   - test: `make test`
@@ -21,4 +21,4 @@
   - security: `make security`
   - fuzz smoke: `make fuzz-smoke`
   - run: `go run ./cmd/pwnbridge --help`
-- Recent-cycle tier log: Cycle 1 HIGH / ROBUSTNESS
+- Recent-cycle tier log: Cycle 1 HIGH / ROBUSTNESS; Cycle 2 HIGH / SECURITY

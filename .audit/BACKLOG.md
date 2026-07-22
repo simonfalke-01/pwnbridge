@@ -2,15 +2,16 @@
 
 ## IN PROGRESS
 
-- [PWB-002] [HIGH] [SECURITY] Refuse source-built binaries compiled by Go toolchain releases affected by CVE-2026-39822. Evidence: `make security` under local Go 1.26.3 reports reachable GO-2026-4970 traces in recovery root operations; `go.mod` permits fixed Go 1.25.12 but cannot exclude the later vulnerable 1.26.0–1.26.4 range.
+- [PWB-003] [MEDIUM] [CORRECTNESS] Translate host workspace paths before treating `/work/...` as an already-container-native cwd. Evidence: code-level reproducer is `RuntimeSpec{Workspace: "/workspaces/chal", Workdir: "/work"}` with host cwd `/workspaces/chal/sub`; current translation incorrectly returns `/workspaces/chal/sub` instead of `/work/sub`, so container execution fails when the remote workspace root is under `/work`.
 
 ## SUBSTANTIVE
 
-- [PWB-003] [MEDIUM] [CORRECTNESS] Translate host workspace paths before treating `/work/...` as an already-container-native cwd. Evidence: code-level reproducer is `RuntimeSpec{Workspace: "/workspaces/chal", Workdir: "/work"}` with host cwd `/workspaces/chal/sub`; current translation incorrectly returns `/workspaces/chal/sub` instead of `/work/sub`, so container execution fails when the remote workspace root is under `/work`.
+- None.
 
 ## JANITORIAL
 
 - [PWB-001] [HIGH] [ROBUSTNESS] Preserve actionable OpenSSH authentication/configuration diagnostics when either control-master startup path fails. Shipped in `c10f12dc5713e8c134e4634041674d70760ec2da` with `TestControlMasterReportsSSHStartupFailure` and `TestSharedControlMasterReportsSSHStartupFailure`.
+- [PWB-002] [HIGH] [SECURITY] Refuse source-built binaries compiled by Go toolchain releases affected by CVE-2026-39822. Shipped in `a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d` with affected/fixed toolchain matrix tests and a real Go 1.26.3 startup refusal.
 
 ## DONE
 
