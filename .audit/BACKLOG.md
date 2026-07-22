@@ -2,7 +2,7 @@
 
 ## IN PROGRESS
 
-- [PWB-005] [HIGH] [ROBUSTNESS] Bound broker health-check request/response I/O so `liveSessions` cannot hang indefinitely on a live but wedged local broker. Evidence: `broker.Ping` applies `DialTimeout` only to connect and then performs unbounded protocol encode/decode synchronously in session discovery; add a nonresponding-listener regression before implementation.
+- None; full audit 4 in progress.
 
 ## SUBSTANTIVE
 
@@ -14,6 +14,7 @@
 - [PWB-002] [HIGH] [SECURITY] Refuse source-built binaries compiled by Go toolchain releases affected by CVE-2026-39822. Shipped in `a087efe4b667cacbd430a2e5ac7b1a7d0ea69a1d` with affected/fixed toolchain matrix tests and a real Go 1.26.3 startup refusal.
 - [PWB-003] [MEDIUM] [CORRECTNESS] Translate host workspace paths before treating `/work/...` as an already-container-native cwd. Shipped in `5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46` with `TestContainerCommandTranslatesHostWorkspaceUnderContainerWorkdirPrefix` while retaining the container-native debugger cwd regression.
 - [PWB-004] [HIGH] [DATA SAFETY] Make create-only CLI outputs atomically refuse overwrite. Shipped in `873c00ca46a5c8e772667999459f5d2f21b0ed67` with existing-export preservation and deterministic concurrent-create regressions.
+- [PWB-005] [HIGH] [ROBUSTNESS] Bound broker health-check request/response I/O so `liveSessions` cannot hang indefinitely on a live but wedged local broker. Shipped in `ecc0c58fa545578a52beb0c9f9038dca49ff2df8` with a nonresponding authenticated-listener regression.
 
 ## DONE
 

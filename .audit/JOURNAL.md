@@ -37,3 +37,12 @@ Append-only record of completed substantive cycles.
 - Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestBootstrapRecipeCRUD`, `TestAtomicCreateRefusesConcurrentTargetWithoutChangingIt`, `TestAtomicCreatePublishesCompleteFile`
 - Senior-review self-check: worth doing because silent replacement contradicts the project's central data-preservation guarantee, and the shared primitive removes the TOCTOU class instead of patching one call site superficially.
 - Commit:      873c00ca46a5c8e772667999459f5d2f21b0ed67 "fix(cli): refuse overwriting create-only outputs"     Pushed: origin/main @ 873c00ca46a5c8e772667999459f5d2f21b0ed67
+
+## Cycle 5 — 2026-07-22T23:20:42+08:00
+- Item:        [PWB-005] Bound broker health-check I/O so lifecycle commands cannot hang       Tier: HIGH   Dimension: ROBUSTNESS
+- Why it mattered: A live but wedged local broker could make session startup and stop/cleanup discovery wait forever with no diagnostic or recovery path.
+- Evidence:    `TestPingTimesOutWhenBrokerAcceptsWithoutResponding` exceeded two seconds before the fix even though the documented connection budget was one second.
+- Change:      Applied the one-second broker ping budget as a connection-wide deadline covering authenticated encode/decode I/O, with a nonresponding listener regression and retained authentication/spoof checks.
+- Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestPingTimesOutWhenBrokerAcceptsWithoutResponding`, `TestBrokerAuthenticationAndPing`, `TestPingRejectsSpoofedResponseIdentity`
+- Senior-review self-check: worth doing because an indefinite hang in the lifecycle discovery path blocks both new work and cleanup, while a bounded health error lets the user identify and terminate the wedged owner process.
+- Commit:      ecc0c58fa545578a52beb0c9f9038dca49ff2df8 "fix(broker): bound session health-check I/O"     Pushed: origin/main @ ecc0c58fa545578a52beb0c9f9038dca49ff2df8
