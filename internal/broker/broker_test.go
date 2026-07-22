@@ -319,6 +319,43 @@ func TestPingRejectsSpoofedResponseIdentity(t *testing.T) {
 	<-done
 }
 
+func TestPingTimesOutWhenBrokerAcceptsWithoutResponding(t *testing.T) {
+	socket := shortBrokerSocket(t)
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- conn
+		}
+	}()
+	record := SessionRecord{ID: "0123456789abcdef", Token: "0123456789abcdef0123456789abcdef", LocalSocket: socket}
+	result := make(chan error, 1)
+	go func() { result <- Ping(record) }()
+	var conn net.Conn
+	select {
+	case conn = <-accepted:
+	case err := <-result:
+		t.Fatalf("broker ping did not connect: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("broker ping did not connect within its timeout")
+	}
+	defer conn.Close()
+	select {
+	case err := <-result:
+		var timeout net.Error
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatalf("nonresponding ping error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker ping remained blocked after its connection timeout")
+	}
+}
+
 func TestSessionRecordRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "0123456789abcdef.json")
 	want := testSessionRecord(path)

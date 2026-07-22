@@ -34,6 +34,7 @@ const maxBrokerConnections = 32
 const brokerHandshakeTimeout = 5 * time.Second
 const brokerProviderOpenTimeout = 30 * time.Second
 const brokerProviderCloseTimeout = 5 * time.Second
+const brokerPingTimeout = time.Second
 
 type SessionRecord struct {
 	Schema                int                  `json:"schema"`
@@ -709,11 +710,14 @@ func RunPane(ctx context.Context, record SessionRecord, requestID string) error 
 }
 
 func Ping(record SessionRecord) error {
-	conn, err := net.DialTimeout("unix", record.LocalSocket, time.Second)
+	conn, err := net.DialTimeout("unix", record.LocalSocket, brokerPingTimeout)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(brokerPingTimeout)); err != nil {
+		return err
+	}
 	request := protocol.Message{Protocol: version.ProtocolVersion, Type: "ping", SessionID: record.ID, Token: record.Token}
 	if err := protocol.Encode(conn, request); err != nil {
 		return err
