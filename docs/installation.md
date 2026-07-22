@@ -51,7 +51,10 @@ depends on the external Mutagen and Mosh formulas and never vendors either.
 
 ## Source build
 
-Requirements are Go 1.25 or 1.26 and a C-free cross-build path:
+Requirements are patched Go 1.25.12 or Go 1.26.5 (or a fixed later release)
+and a C-free cross-build path. Pwnbridge refuses to start when built with Go
+1.26.0 through 1.26.4 because those standard libraries are affected by
+CVE-2026-39822 in the `os.Root` boundary used by recovery operations.
 
 ```console
 git clone https://github.com/simonfalke-01/pwnbridge.git

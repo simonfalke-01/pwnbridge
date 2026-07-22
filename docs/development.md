@@ -6,6 +6,10 @@ Pwnbridge's module language version is Go 1.25. CI runs patched Go 1.25.12 and
 Go 1.26.5 on macOS and Ubuntu. The client is tested on
 Darwin ARM64; the remote agent is a static Linux amd64 cross-build.
 
+Do not build with Go 1.26.0 through 1.26.4. Those releases are affected by
+CVE-2026-39822 in reachable `os.Root` operations; both Pwnbridge binaries fail
+closed at startup when compiled by a known-affected toolchain.
+
 ```console
 make verify
 make test-race

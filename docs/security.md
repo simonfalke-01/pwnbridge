@@ -24,6 +24,11 @@ Potentially hostile:
 - same-container processes;
 - a remote account after it has been compromised.
 
+Both shipped binaries fail closed when built by a toolchain known to contain
+CVE-2026-39822, because recovery confinement reaches the affected `os.Root`
+operations. The supported patched floors are Go 1.25.12 and Go 1.26.5; official
+release and CI builds use those fixed versions.
+
 Direct-host mode executes as the configured remote Unix account. A challenge
 there can access everything that account can access. Use a dedicated,
 unprivileged pwn account without valuable credentials.

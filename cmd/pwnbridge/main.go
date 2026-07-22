@@ -9,9 +9,14 @@ import (
 	"syscall"
 
 	"github.com/simonfalke-01/pwnbridge/internal/cli"
+	"github.com/simonfalke-01/pwnbridge/internal/version"
 )
 
 func main() {
+	if err := version.CheckRuntimeToolchain(); err != nil {
+		fmt.Fprintln(os.Stderr, filepath.Base(os.Args[0])+":", err)
+		os.Exit(1)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGHUP, syscall.SIGTERM)
 	defer stop()
 	app, err := cli.New()
