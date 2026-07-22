@@ -1,14 +1,14 @@
 # Audit State
 
-- Cycle: 1
-- Last pushed hash: `0b8706e` (`origin/main`)
+- Cycle: 2
+- Last pushed hash: `c10f12dc5713e8c134e4634041674d70760ec2da` (`origin/main`)
 - Working branch: `main`
-- Item in progress: `[PWB-001] Preserve actionable OpenSSH diagnostics when control-master startup fails`
-- Working tree at session start: branch matched `origin/main`; pre-existing modification in `internal/transport/transport.go` removed `-q` from shared-master startup and left the suite red because a test matched the old argv.
-- Build: pending cycle verification
-- Tests: RED at baseline; `TestSharedControlMasterStartsOnceAndStopsExplicitly` failed against the pre-existing edit
-- Lint/type-check: pending cycle verification
-- Format: pending cycle verification
+- Item in progress: `[PWB-002] Refuse binaries built with Go releases affected by CVE-2026-39822`
+- Working tree at session start: reconciled and clean after PWB-001; branch matches `origin/main`
+- Build: GREEN (`GOTOOLCHAIN=go1.26.5 make build`)
+- Tests: GREEN (`GOTOOLCHAIN=go1.26.5 make verify` and `make test-race`)
+- Lint/type-check: GREEN (`make verify` includes `go vet ./...`)
+- Format: GREEN (`make verify` includes `make fmt-check`)
 - Security: RED under local Go 1.26.3 due reachable GO-2026-4970 / CVE-2026-39822; CI and releases use fixed Go 1.26.5
 - Exact commands:
   - build: `make build`
@@ -21,4 +21,4 @@
   - security: `make security`
   - fuzz smoke: `make fuzz-smoke`
   - run: `go run ./cmd/pwnbridge --help`
-- Recent-cycle tier log: none (tracking initialized this cycle)
+- Recent-cycle tier log: Cycle 1 HIGH / ROBUSTNESS
