@@ -607,6 +607,45 @@ exit 0
 	}
 }
 
+func TestControlMasterReportsSSHStartupFailure(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+case " $* " in
+  *" -q "*) exit 255 ;;
+esac
+printf 'Permission denied (publickey).\n' >&2
+exit 255
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Client{SSH: ssh, Destination: "fake"}).StartControlMaster(context.Background(), filepath.Join(dir, "runtime"))
+	if err == nil || !strings.Contains(err.Error(), "Permission denied (publickey).") {
+		t.Fatalf("startup error did not retain SSH diagnostic: %v", err)
+	}
+}
+
+func TestSharedControlMasterReportsSSHStartupFailure(t *testing.T) {
+	dir := t.TempDir()
+	ssh := filepath.Join(dir, "ssh")
+	script := `#!/bin/sh
+case " $* " in
+  *" -O check "*) exit 1 ;;
+  *" -q "*) exit 255 ;;
+esac
+printf 'Permission denied (publickey).\n' >&2
+exit 255
+`
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (Client{SSH: ssh, Destination: "fake"}).StartSharedControlMaster(context.Background(), filepath.Join(dir, "control"))
+	if err == nil || !strings.Contains(err.Error(), "Permission denied (publickey).") {
+		t.Fatalf("startup error did not retain SSH diagnostic: %v", err)
+	}
+}
+
 func TestSharedControlMasterStartsOnceAndStopsExplicitly(t *testing.T) {
 	dir := t.TempDir()
 	ssh := filepath.Join(dir, "ssh")
@@ -651,7 +690,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if starts := strings.Count(string(data), " -M -N -f "); starts != 1 {
+	if starts := strings.Count(string(data), "-M -N -f "); starts != 1 {
 		t.Fatalf("shared master starts = %d: %s", starts, data)
 	}
 	if !strings.Contains(string(data), "ControlPersist=2m") || !strings.Contains(string(data), "ForwardAgent=no") {

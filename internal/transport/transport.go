@@ -343,7 +343,7 @@ func (c Client) StartControlMaster(ctx context.Context, runtimeDir string) (*Mas
 		return nil, err
 	}
 	control := filepath.Join(runtimeDir, "c")
-	args := []string{"-q", "-M", "-N", "-S", control,
+	args := []string{"-M", "-N", "-S", control,
 		"-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o", "ClearAllForwardings=yes",
 		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ForwardAgent=no",
 		"-o", "ForwardX11=no", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindMask=0177",
@@ -434,7 +434,7 @@ func (c Client) StartSharedControlMaster(ctx context.Context, controlDir string)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return nil, fmt.Errorf("inspect shared SSH control socket: %w", statErr)
 	}
-	args := []string{"-q", "-M", "-N", "-f", "-S", control,
+	args := []string{"-M", "-N", "-f", "-S", control,
 		"-o", "ControlMaster=yes", "-o", "ControlPersist=" + sharedControlPersist,
 		"-o", "ClearAllForwardings=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
 		"-o", "ForwardAgent=no", "-o", "ForwardX11=no", "-o", "ExitOnForwardFailure=yes",
