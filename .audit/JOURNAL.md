@@ -28,3 +28,12 @@ Append-only record of completed substantive cycles.
 - Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestContainerCommandTranslatesHostWorkspaceUnderContainerWorkdirPrefix`, `TestContainerCommandPreservesContainerCwd`
 - Senior-review self-check: worth doing because an explicitly supported remote workspace root could make the entire optional container runtime unusable, and the fix resolves the namespace ambiguity with the authoritative mount mapping.
 - Commit:      5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46 "fix(runtime): map host workspace cwd before container paths"     Pushed: origin/main @ 5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46
+
+## Cycle 4 — 2026-07-22T23:16:46+08:00
+- Item:        [PWB-004] Make create-only CLI outputs atomically refuse overwrite       Tier: HIGH   Dimension: DATA SAFETY
+- Why it mattered: Repeating a recipe export silently destroyed the existing file, and `init` could replace content created between its path check and commit despite promising non-destructive creation.
+- Evidence:    `TestBootstrapRecipeCRUD` failed before the fix because a second export returned success and replaced `valuable local edit`; the deterministic `TestAtomicCreateRefusesConcurrentTargetWithoutChangingIt` covers the check/commit race.
+- Change:      Added durable same-directory exclusive publication, migrated init templates and recipe exports, preserved explicit existing-file errors, documented no-overwrite behavior, and tested successful content/mode publication plus racing and ordinary existing targets.
+- Verification: build=pass tests=pass lint=pass cli-run=pass  regression-test=`TestBootstrapRecipeCRUD`, `TestAtomicCreateRefusesConcurrentTargetWithoutChangingIt`, `TestAtomicCreatePublishesCompleteFile`
+- Senior-review self-check: worth doing because silent replacement contradicts the project's central data-preservation guarantee, and the shared primitive removes the TOCTOU class instead of patching one call site superficially.
+- Commit:      873c00ca46a5c8e772667999459f5d2f21b0ed67 "fix(cli): refuse overwriting create-only outputs"     Pushed: origin/main @ 873c00ca46a5c8e772667999459f5d2f21b0ed67
