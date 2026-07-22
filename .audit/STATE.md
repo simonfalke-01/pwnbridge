@@ -1,0 +1,24 @@
+# Audit State
+
+- Cycle: 1
+- Last pushed hash: `0b8706e` (`origin/main`)
+- Working branch: `main`
+- Item in progress: `[PWB-001] Preserve actionable OpenSSH diagnostics when control-master startup fails`
+- Working tree at session start: branch matched `origin/main`; pre-existing modification in `internal/transport/transport.go` removed `-q` from shared-master startup and left the suite red because a test matched the old argv.
+- Build: pending cycle verification
+- Tests: RED at baseline; `TestSharedControlMasterStartsOnceAndStopsExplicitly` failed against the pre-existing edit
+- Lint/type-check: pending cycle verification
+- Format: pending cycle verification
+- Security: RED under local Go 1.26.3 due reachable GO-2026-4970 / CVE-2026-39822; CI and releases use fixed Go 1.26.5
+- Exact commands:
+  - build: `make build`
+  - test: `make test`
+  - race test: `make test-race`
+  - lint/type-check: `make vet`
+  - format check: `make fmt-check`
+  - format: `make fmt`
+  - full verification: `make verify`
+  - security: `make security`
+  - fuzz smoke: `make fuzz-smoke`
+  - run: `go run ./cmd/pwnbridge --help`
+- Recent-cycle tier log: none (tracking initialized this cycle)
