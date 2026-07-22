@@ -1,9 +1,9 @@
 # Audit State
 
 - Cycle: 5
-- Last pushed hash: `873c00ca46a5c8e772667999459f5d2f21b0ed67` (`origin/main`)
+- Last pushed hash: `e7ab0b6b864cad11b2af9f891b9ccde1dfc988ab` (`origin/main`)
 - Working branch: `main`
-- Item in progress: full audit 3; substantive pool exhausted after PWB-004
+- Item in progress: `[PWB-005] Bound broker health-check I/O so lifecycle commands cannot hang`
 - Working tree at session start: clean after PWB-004; branch matches `origin/main`
 - Build: GREEN (`GOTOOLCHAIN=go1.26.5 make build`)
 - Tests: GREEN (`GOTOOLCHAIN=go1.26.5 make verify` and `make test-race`)

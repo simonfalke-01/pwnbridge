@@ -87,3 +87,35 @@ The three highest-impact things the tool is currently missing or getting wrong a
 
 - The repeated need for create-only durable output is a real missing filesystem capability; solving it once in `fsutil` avoids separate TOCTOU-prone CLI checks.
 - No new dependency is required. Same-directory temporary-file linking can provide portable atomic no-replace semantics on the supported macOS client filesystems.
+
+## Full Audit 3 — 2026-07-22T23:17:48+08:00
+
+### Big rocks
+
+The three highest-impact things the tool is currently missing or getting wrong are:
+
+1. **Local broker health checks can hang lifecycle commands forever.** `broker.Ping` bounds only the Unix-socket connection; its authenticated request and response have no deadline. `liveSessions` calls it synchronously while starting and stopping workspace activity, so a live but wedged owner process can make recovery commands hang instead of returning an actionable error. Tracked as PWB-005.
+2. **Debugger pane connection establishment is not context-aware.** `RunPane` uses a plain Unix `net.Dial` before entering its cancellation-aware process loop. Supported local Unix connects normally resolve promptly, so this remains PWB-Q004 until a safe blocked-connect reproducer establishes real impact.
+3. **Application-window provider inspection has internally inconsistent state.** It reports a missing self-deleting launcher as `Exists=true`; however, production does not currently call `WaitUntilGone`, so changing it would not affect a real user today. Recorded as PWB-Q005 rather than promoted past the significance gate.
+
+### Security
+
+- The fixed-toolchain security scan remains green. The broker validates protocol, session, token, request identity, caps unauthenticated connections, and bounds handshake time.
+- A nonresponding authenticated or stale local listener is an availability problem rather than an authentication bypass; the remedy is a bounded request deadline, not broader trust.
+
+### Correctness and robustness
+
+- Read the full broker connection lifecycle, session-record discovery/leases, pane cancellation, provider close timeouts, and local/remote dial sites.
+- Broker inbound handshakes and provider opens/closes are bounded, but the outbound health-check exchange is not; PWB-005 is the only reproduced/significant candidate selected from this pass.
+- Plain `RunPane` dialing and dormant application-window inspection are explicitly held as open questions to avoid speculative fixes.
+
+### CLI UX, testing, and performance
+
+- The affected `liveSessions` path feeds session startup and stop/cleanup behavior, making an indefinite wait a material CLI failure with no diagnostic.
+- Existing ping tests cover authentication and spoofed responses but not a listener that accepts and never replies. PWB-005 requires that regression first.
+- No benchmark-backed performance item was found.
+
+### Architecture, dependencies, portability, and documentation
+
+- A connection-wide deadline on the existing local Unix socket is sufficient and dependency-free; it also bounds writes if the peer stops reading.
+- No public CLI or documentation contract needs to change: the intended behavior is already bounded, actionable failure.
