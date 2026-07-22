@@ -19,6 +19,74 @@ func AtomicWrite(path string, data []byte, mode os.FileMode) error {
 	})
 }
 
+// AtomicCreate publishes a fully written file only when path does not exist.
+// Linking a same-directory temporary file makes the no-replace check and
+// commit one filesystem operation, so a concurrent creator is never lost.
+func AtomicCreate(path string, data []byte, mode os.FileMode) error {
+	return atomicCreate(path, data, mode, atomicCreateHooks{
+		syncFile: syncDurable, link: os.Link, remove: os.Remove, syncDirectories: syncDirectoryChain,
+	})
+}
+
+type atomicCreateHooks struct {
+	syncFile        func(*os.File) error
+	link            func(string, string) error
+	remove          func(string) error
+	syncDirectories func(string, string) error
+}
+
+func atomicCreate(path string, data []byte, mode os.FileMode, hooks atomicCreateHooks) error {
+	parent := filepath.Dir(path)
+	existingParent, err := nearestExistingDirectory(parent)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return fmt.Errorf("create parent for %s: %w", path, err)
+	}
+	f, err := os.CreateTemp(parent, ".pwnbridge-tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temporary file: %w", err)
+	}
+	name := f.Name()
+	temporaryExists := true
+	defer func() {
+		if temporaryExists {
+			_ = os.Remove(name)
+		}
+	}()
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := hooks.syncFile(f); err != nil {
+		f.Close()
+		return fmt.Errorf("sync temporary file for %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := hooks.link(name, path); err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	removeErr := hooks.remove(name)
+	if removeErr == nil {
+		temporaryExists = false
+	}
+	syncErr := hooks.syncDirectories(parent, existingParent)
+	if removeErr != nil {
+		return errors.Join(fmt.Errorf("remove temporary link after creating %s: %w", path, removeErr), syncErr)
+	}
+	if syncErr != nil {
+		return fmt.Errorf("sync directories after creating %s: %w", path, syncErr)
+	}
+	return nil
+}
+
 type atomicWriteHooks struct {
 	syncFile        func(*os.File) error
 	rename          func(string, string) error

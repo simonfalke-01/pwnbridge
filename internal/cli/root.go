@@ -765,18 +765,15 @@ func (a *App) initCommand() *cobra.Command {
 			return err
 		}
 		configPath := filepath.Join(cwd, ".pwnbridge.toml")
-		if _, err := os.Stat(configPath); err == nil {
-			return fmt.Errorf("%s already exists", configPath)
-		}
 		content := "schema = 1\ntarget = \"linux/amd64\"\n\n[workspace]\nroot = \".\"\nignore = []\n\n[environment]\nprofile = \"pwn\"\nset = {}\n\n[shell]\ncommand = \"bash\"\nsource_user_rc = true\n\n[runtime]\nkind = \"host\"\n"
-		if err := fsutil.AtomicWrite(configPath, []byte(content), 0o600); err != nil {
+		if err := fsutil.AtomicCreate(configPath, []byte(content), 0o600); errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists", configPath)
+		} else if err != nil {
 			return err
 		}
 		ignorePath := filepath.Join(cwd, ".pwnbridgeignore")
-		if _, err := os.Stat(ignorePath); errors.Is(err, os.ErrNotExist) {
-			if err := fsutil.AtomicWrite(ignorePath, []byte("# Project-specific synchronization ignores\n"), 0o600); err != nil {
-				return err
-			}
+		if err := fsutil.AtomicCreate(ignorePath, []byte("# Project-specific synchronization ignores\n"), 0o600); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
 		}
 		fmt.Fprintln(a.Out, "created", configPath)
 		return nil
@@ -1809,7 +1806,11 @@ func (a *App) bootstrapConfigCommand() *cobra.Command {
 			_, err = a.Out.Write(data)
 			return err
 		}
-		return fsutil.AtomicWrite(exportOutput, data, 0o600)
+		if err := fsutil.AtomicCreate(exportOutput, data, 0o600); errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists", exportOutput)
+		} else {
+			return err
+		}
 	}}
 	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "-", "output file or - for stdout")
 	root.AddCommand(exportCmd)

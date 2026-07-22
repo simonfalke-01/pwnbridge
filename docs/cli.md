@@ -162,6 +162,11 @@ Recipe commands are `config bootstrap list`, `show NAME [--json]`, `import
 FILE [--name NAME] [--replace]`, `export NAME [--output FILE|-]`, and `remove
 NAME`.
 
+Recipe export writes to stdout by default. An explicit output file is created
+durably and is never overwritten; choose a new path or remove the old file
+deliberately before exporting again. `pwnbridge init` applies the same atomic
+no-overwrite rule to `.pwnbridge.toml` and `.pwnbridgeignore`.
+
 `auto` is the default interactive transport and uses pwnbridge predictive echo
 over an inline SSH PTY. `ssh` uses the same PTY without prediction. `mosh`
 explicitly selects Mosh and requires the local client, remote `mosh-server`,

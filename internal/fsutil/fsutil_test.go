@@ -142,6 +142,54 @@ func TestAtomicWriteDurabilityOrderAndFailureBoundaries(t *testing.T) {
 	})
 }
 
+func TestAtomicCreateRefusesConcurrentTargetWithoutChangingIt(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "created")
+	const concurrent = "concurrent user content"
+	err := atomicCreate(path, []byte("generated"), 0o600, atomicCreateHooks{
+		syncFile: func(file *os.File) error { return file.Sync() },
+		link: func(oldPath, newPath string) error {
+			if err := os.WriteFile(newPath, []byte(concurrent), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			return os.Link(oldPath, newPath)
+		},
+		remove:          os.Remove,
+		syncDirectories: syncDirectoryChain,
+	})
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("atomic create race = %v", err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || string(data) != concurrent {
+		t.Fatalf("concurrent target changed: %q, %v", data, readErr)
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("concurrent target mode changed: %v, %v", info, statErr)
+	}
+	assertNoAtomicTemps(t, root)
+}
+
+func TestAtomicCreatePublishesCompleteFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "new", "created")
+	if err := AtomicCreate(path, []byte("complete"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "complete" {
+		t.Fatalf("created content = %q, %v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("created mode = %v, %v", info, err)
+	}
+	if err := AtomicCreate(path, []byte("replacement"), 0o600); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second create = %v", err)
+	}
+}
+
 func testAtomicWriteFailure(t *testing.T, want string, run func(string) error) {
 	t.Helper()
 	root := t.TempDir()

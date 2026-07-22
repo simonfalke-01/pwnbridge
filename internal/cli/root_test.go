@@ -362,6 +362,16 @@ func TestBootstrapRecipeCRUD(t *testing.T) {
 	if info, err := os.Stat(exported); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("export mode: %v %v", info, err)
 	}
+	const localEdit = "valuable local edit\n"
+	if err := os.WriteFile(exported, []byte(localEdit), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(t, app, "config", "bootstrap", "export", "lab", "--output", exported); err == nil {
+		t.Fatal("export silently overwrote an existing output file")
+	}
+	if data, err := os.ReadFile(exported); err != nil || string(data) != localEdit {
+		t.Fatalf("failed export changed existing content: %q, %v", data, err)
+	}
 	if err := execute(t, app, "config", "bootstrap", "remove", "lab"); err != nil {
 		t.Fatal(err)
 	}
