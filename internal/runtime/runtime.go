@@ -300,17 +300,17 @@ func Stop(ctx context.Context, spec protocol.RuntimeSpec) error {
 }
 
 func translateCwd(spec protocol.RuntimeSpec, cwd string) string {
-	if spec.Workdir != "" {
-		if rel, err := filepath.Rel(spec.Workdir, cwd); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return filepath.ToSlash(cwd)
-		}
-	}
 	if spec.Workspace != "" {
 		if rel, err := filepath.Rel(spec.Workspace, cwd); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			if rel == "." {
 				return spec.Workdir
 			}
 			return filepath.ToSlash(filepath.Join(spec.Workdir, rel))
+		}
+	}
+	if spec.Workdir != "" {
+		if rel, err := filepath.Rel(spec.Workdir, cwd); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(cwd)
 		}
 	}
 	return spec.Workdir

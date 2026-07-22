@@ -2,7 +2,7 @@
 
 ## IN PROGRESS
 
-- [PWB-003] [MEDIUM] [CORRECTNESS] Translate host workspace paths before treating `/work/...` as an already-container-native cwd. Evidence: code-level reproducer is `RuntimeSpec{Workspace: "/workspaces/chal", Workdir: "/work"}` with host cwd `/workspaces/chal/sub`; current translation incorrectly returns `/workspaces/chal/sub` instead of `/work/sub`, so container execution fails when the remote workspace root is under `/work`.
+- [PWB-003] [MEDIUM] [CORRECTNESS] Translate host workspace paths before treating `/work/...` as an already-container-native cwd. Evidence: code-level reproducer is `RuntimeSpec{Workspace: "/work/chal", Workdir: "/work"}` with host cwd `/work/chal/sub`; current translation incorrectly returns `/work/chal/sub` instead of `/work/sub`, so container execution fails when the remote workspace root is under `/work`.
 
 ## SUBSTANTIVE
 

@@ -8,7 +8,7 @@ The three highest-impact things the tool is currently missing or getting wrong a
 
 1. **SSH master startup suppresses the diagnostic needed to recover from authentication and configuration failures.** Both master paths capture bounded stderr but pass OpenSSH `-q`; a failing regression proved the resulting error contains only `exit status 255`, not `Permission denied (publickey).` This violates the charter's actionable-failure principle and is tracked as PWB-001.
 2. **Source builds can run with a known-vulnerable Go patch release despite the module's safe minimum.** The local Go 1.26.3 build reaches vulnerable `os.Root` operations in recovery code under GO-2026-4970 / CVE-2026-39822. CI and releases use Go 1.26.5, but direct `go build` accepts 1.26.0–1.26.4 because those versions are newer than the safe `go 1.25.12` module floor. This threatens descriptor-rooted recovery confinement and is tracked as PWB-002.
-3. **Container cwd translation confuses a valid host path under `/work` with a container-native path.** Because translation checks the configured container workdir before the mounted host workspace, a host workspace such as `/workspaces/chal` maps to a nonexistent container path instead of `/work`. This breaks container commands for a supported absolute remote workspace root and is tracked as PWB-003.
+3. **Container cwd translation confuses a valid host path under `/work` with a container-native path.** Because translation checks the configured container workdir before the mounted host workspace, a host workspace such as `/work/chal` maps to a nonexistent container path instead of `/work`. This breaks container commands for a supported absolute remote workspace root and is tracked as PWB-003.
 
 ### Security
 

@@ -72,6 +72,26 @@ func TestContainerCommandPreservesContainerCwd(t *testing.T) {
 	t.Fatalf("container cwd was not preserved: %#v", cmd.Args)
 }
 
+func TestContainerCommandTranslatesHostWorkspaceUnderContainerWorkdirPrefix(t *testing.T) {
+	spec := protocol.RuntimeSpec{
+		Kind: "container", Engine: "docker", ID: "pwnbridge-x",
+		Workdir: "/work", Workspace: "/work/chal",
+	}
+	cmd, err := Command(spec, false, "/work/chal/sub", nil, []string{"pwd"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, argument := range cmd.Args {
+		if argument == "-w" && index+1 < len(cmd.Args) {
+			if got := cmd.Args[index+1]; got != "/work/sub" {
+				t.Fatalf("container cwd = %q, want /work/sub: %#v", got, cmd.Args)
+			}
+			return
+		}
+	}
+	t.Fatalf("container cwd was not supplied: %#v", cmd.Args)
+}
+
 func TestPodmanEnsureUsesIsolationAndOwnedMounts(t *testing.T) {
 	dir := t.TempDir()
 	engine := filepath.Join(dir, "podman")
