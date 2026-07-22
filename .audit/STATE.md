@@ -1,15 +1,18 @@
 # Audit State
 
 - Cycle: 4
-- Last pushed hash: `5b4484dde9b6ebf3a94131e9816f6ce28e0ddb46` (`origin/main`)
+- Last pushed hash: `182b417282b92e7f7216f916543c242f7fcecab2` (`origin/main`)
 - Working branch: `main`
-- Item in progress: full audit 2; substantive pool exhausted after PWB-003
+- Item in progress: `[PWB-004] Make create-only CLI outputs atomically refuse overwrite`
 - Working tree at session start: clean after PWB-003; branch matches `origin/main`
 - Build: GREEN (`GOTOOLCHAIN=go1.26.5 make build`)
 - Tests: GREEN (`GOTOOLCHAIN=go1.26.5 make verify` and `make test-race`)
 - Lint/type-check: GREEN (`make verify` includes `go vet ./...`)
 - Format: GREEN (`make verify` includes `make fmt-check`)
 - Security: GREEN under fixed Go 1.26.5; known-affected source builds now fail closed at startup
+- Fuzz: GREEN (`make fuzz-smoke FUZZTIME=5s` across all 13 targets)
+- Workflow lint: GREEN (`actionlint .github/workflows/*.yml`)
+- Shell lint: informational SC2012 only in a fixed-path E2E inode assertion; filed as janitorial
 - Exact commands:
   - build: `make build`
   - test: `make test`
